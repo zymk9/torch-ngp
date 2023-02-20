@@ -10,4 +10,6 @@ python3 main_nerf_mask.py \
 --lr 1e-2 \
 --ckpt ./workspace/3dfront_nerf/3dfront_0019_00/checkpoints/ngp_ep0055.pth \
 --load_model_only \
---train_mask
+--train_mask \
+--dataset_name 3dfront \
+--wandb

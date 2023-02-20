@@ -8,6 +8,8 @@ from nerf.utils import *
 from functools import partial
 from loss import huber_loss
 
+import wandb
+
 torch.autograd.set_detect_anomaly(True)
 
 if __name__ == '__main__':
@@ -65,6 +67,10 @@ if __name__ == '__main__':
 
     ### mask training options
     parser.add_argument('--train_mask', action='store_true', help="train mask, use only after rgbsigma is converged")
+
+    parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
+    parser.add_argument('--dataset_name', type=str, default='default', choices=['3dfront', 'scannet', 'hypersim'], 
+                        help='A dataset name for wandb logging')
 
     opt = parser.parse_args()
 
@@ -176,7 +182,7 @@ if __name__ == '__main__':
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
                            scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, 
-                           eval_interval=50, load_model_only=opt.load_model_only)
+                           eval_interval=10, load_model_only=opt.load_model_only)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)
