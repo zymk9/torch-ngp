@@ -231,12 +231,10 @@ class NeRFMaskRenderer(NeRFRenderer):
         }
 
 
-    # TODO: add CUDA support for mask logits
-    def run_cuda(self, rays_o, rays_d, dt_gamma=0, bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, T_thresh=1e-4, **kwargs):
+    def run_cuda(self, rays_o, rays_d, render_mask, dt_gamma=0, bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, T_thresh=1e-4, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
+        # render_mask: bool, whether to render instance mask
         # return: image: [B, N, 3], depth: [B, N]
-
-        raise NotImplementedError()
 
         prefix = rays_o.shape[:-1]
         rays_o = rays_o.contiguous().view(-1, 3)
@@ -281,23 +279,43 @@ class NeRFMaskRenderer(NeRFRenderer):
                 K = sigmas.shape[0]
                 depths = []
                 images = []
+                masks_out = []
                 for k in range(K):
-                    weights_sum, depth, image = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays, T_thresh)
+                    if not render_mask:
+                        weights_sum, depth, image = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays, T_thresh)
+                    else:
+                        weights_sum, depth, image, mask_out = raymarching.composite_rays_with_masks_train(
+                            sigmas[k], rgbs[k], masks[k], deltas, rays, T_thresh
+                        )
+
                     image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
                     depth = torch.clamp(depth - nears, min=0) / (fars - nears)
                     images.append(image.view(*prefix, 3))
                     depths.append(depth.view(*prefix))
+
+                    if render_mask:
+                        masks_out.append(mask_out.view(*prefix, self.num_instances))
             
                 depth = torch.stack(depths, axis=0) # [K, B, N]
                 image = torch.stack(images, axis=0) # [K, B, N, 3]
+                if render_mask:
+                    mask_logits = torch.stack(masks_out, axis=0) # [K, B, N, num_instances]
 
             else:
 
-                weights_sum, depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh)
+                if not render_mask:
+                    weights_sum, depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh)
+                else:
+                    weights_sum, depth, image, mask_out = raymarching.composite_rays_with_masks_train(
+                        sigmas, rgbs, masks, deltas, rays, T_thresh
+                    )
                 image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
                 depth = torch.clamp(depth - nears, min=0) / (fars - nears)
                 image = image.view(*prefix, 3)
                 depth = depth.view(*prefix)
+
+                if render_mask:
+                    mask_logits = mask_out.view(*prefix, self.num_instances)
             
             results['weights_sum'] = weights_sum
 
@@ -312,6 +330,8 @@ class NeRFMaskRenderer(NeRFRenderer):
             weights_sum = torch.zeros(N, dtype=dtype, device=device)
             depth = torch.zeros(N, dtype=dtype, device=device)
             image = torch.zeros(N, 3, dtype=dtype, device=device)
+            if render_mask:
+                mask_logits = torch.zeros(N, self.num_instances, dtype=dtype, device=device)
             
             n_alive = N
             rays_alive = torch.arange(n_alive, dtype=torch.int32, device=device) # [N]
@@ -333,13 +353,19 @@ class NeRFMaskRenderer(NeRFRenderer):
 
                 xyzs, dirs, deltas = raymarching.march_rays(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, self.bound, self.density_bitfield, self.cascade, self.grid_size, nears, fars, 128, perturb if step == 0 else False, dt_gamma, max_steps)
 
-                sigmas, rgbs = self(xyzs, dirs)
+                sigmas, rgbs, masks = self(xyzs, dirs)
                 # density_outputs = self.density(xyzs) # [M,], use a dict since it may include extra things, like geo_feat for rgb.
                 # sigmas = density_outputs['sigma']
                 # rgbs = self.color(xyzs, dirs, **density_outputs)
                 sigmas = self.density_scale * sigmas
 
-                raymarching.composite_rays(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image, T_thresh)
+                if not render_mask:
+                    raymarching.composite_rays(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image, T_thresh)
+                else:
+                    raymarching.composite_rays_with_masks(
+                        n_alive, n_step, self.num_instances, rays_alive, rays_t, sigmas, rgbs, masks, deltas, 
+                        weights_sum, depth, image, mask_logits, T_thresh
+                    )
 
                 rays_alive = rays_alive[rays_alive >= 0]
 
@@ -351,9 +377,12 @@ class NeRFMaskRenderer(NeRFRenderer):
             depth = torch.clamp(depth - nears, min=0) / (fars - nears)
             image = image.view(*prefix, 3)
             depth = depth.view(*prefix)
+            if render_mask:
+                mask_logits = mask_logits.view(*prefix, self.num_instances)
         
         results['depth'] = depth
         results['image'] = image
+        results['instance_mask_logits'] = mask_logits if render_mask else None
 
         return results
 
@@ -555,6 +584,6 @@ class NeRFMaskRenderer(NeRFRenderer):
             results['instance_mask_logits'] = mask_logits
 
         else:
-            results = _run(rays_o, rays_d, **kwargs)
+            results = _run(rays_o, rays_d, render_mask, **kwargs)
 
         return results

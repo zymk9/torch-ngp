@@ -32,6 +32,9 @@ from packaging import version as pver
 import lpips
 from torchmetrics.functional import structural_similarity_index_measure
 
+import wandb
+from copy import deepcopy
+
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
     if pver.parse(torch.__version__) < pver.parse('1.10'):
@@ -244,6 +247,9 @@ class MeanIoUMeter:
 
     def report(self):
         return f'mIoU = {self.measure():.6f}'
+    
+    def name(self):
+        return 'mIoU'
 
 
 class PSNRMeter:
@@ -282,6 +288,9 @@ class PSNRMeter:
     def report(self):
         return f'PSNR = {self.measure():.6f}'
 
+    def name(self):
+        return 'PSNR'
+
 
 class SSIMMeter:
     def __init__(self, device=None):
@@ -318,6 +327,9 @@ class SSIMMeter:
 
     def report(self):
         return f'SSIM = {self.measure():.6f}'
+    
+    def name(self):
+        return 'SSIM'
 
 
 class LPIPSMeter:
@@ -356,6 +368,9 @@ class LPIPSMeter:
     def report(self):
         return f'LPIPS ({self.net}) = {self.measure():.6f}'
 
+    def name(self):
+        return 'LPIPS'
+
 class Trainer(object):
     def __init__(self, 
                  name, # name of this experiment
@@ -380,6 +395,7 @@ class Trainer(object):
                  use_checkpoint="latest", # which ckpt to use at init time
                  use_tensorboardX=True, # whether to use tensorboard for logging
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
+                 load_model_only=False, # if True, will not load optimizer, scheduler, etc. 
                  ):
         
         self.name = name
@@ -483,7 +499,7 @@ class Trainer(object):
                     self.load_checkpoint()
             else: # path to ckpt
                 self.log(f"[INFO] Loading {self.use_checkpoint} ...")
-                self.load_checkpoint(self.use_checkpoint)
+                self.load_checkpoint(self.use_checkpoint, model_only=load_model_only)
         
         # clip loss prepare
         if opt.rand_pose >= 0: # =0 means only using CLIP loss, >0 means a hybrid mode.
@@ -491,6 +507,15 @@ class Trainer(object):
             self.clip_loss = CLIPLoss(self.device)
             self.clip_loss.prepare_text([self.opt.clip_text]) # only support one text prompt now...
 
+        # wandb
+        if opt.wandb:
+            if opt.train_mask:
+                project_name = f'torch-ngp_mask_{opt.dataset_name}' 
+            else:
+                project_name = f'torch-ngp_{opt.dataset_name}'
+                    
+            wandb.init(project=project_name, entity='nerf-rpn-2022', name=opt.workspace.split('/')[-1])
+            wandb.config = deepcopy(opt)
 
     def __del__(self):
         if self.log_ptr: 
@@ -930,6 +955,16 @@ class Trainer(object):
                 else:
                     pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
                 pbar.update(loader.batch_size)
+            
+                if self.opt.wandb:
+                    wandb.log({
+                        'lr': self.optimizer.param_groups[0]['lr'],
+                        'loss_val': loss_val,
+                        'loss_avg': total_loss / self.local_step,
+                        'epoch': self.epoch,
+                        'local_step': self.local_step,
+                        'global_step': self.global_step,
+                    })
 
         if self.ema is not None:
             self.ema.update()
@@ -1044,6 +1079,10 @@ class Trainer(object):
             else:
                 self.stats["results"].append(average_loss) # if no metric, choose best by min loss
 
+            results = {}
+            for metric in self.metrics:
+                results.update({metric.name(): metric.measure()})
+            
             for metric in self.metrics:
                 self.log(metric.report(), style="blue")
                 if self.use_tensorboardX:
@@ -1054,6 +1093,9 @@ class Trainer(object):
             self.ema.restore()
 
         self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+
+        if self.opt.wandb:
+            wandb.log(results, commit=True)
 
     def save_checkpoint(self, name=None, full=False, best=False, remove_old=True):
 
@@ -1142,7 +1184,11 @@ class Trainer(object):
             self.log(f"[WARN] unexpected keys: {unexpected_keys}")   
 
         if self.ema is not None and 'ema' in checkpoint_dict:
-            self.ema.load_state_dict(checkpoint_dict['ema'])
+            try:
+                self.ema.load_state_dict(checkpoint_dict['ema'])
+                self.log("[INFO] loaded ema.")
+            except:
+                self.log("[WARN] Failed to load ema.")
 
         if self.model.cuda_ray:
             if 'mean_count' in checkpoint_dict:
@@ -1189,6 +1235,14 @@ class MaskTrainer(Trainer):
             plt.cm.get_cmap('gist_ncar', 37)((i * 7 + 5) % 37)[:3] for i in range(37)
         ], 255).astype(np.uint8)
 
+        self.num_instances = self.model.num_instances
+
+        # freeze rgb and density
+        self.model.encoder.requires_grad_(False)
+        self.model.sigma_net.requires_grad_(False)
+        self.model.encoder_dir.requires_grad_(False)
+        self.model.color_net.requires_grad_(False)
+
     ### ------------------------------
 
     def train_step(self, data):
@@ -1199,7 +1253,7 @@ class MaskTrainer(Trainer):
         gt_masks = data['masks'] # [B, N], N=H*W?
 
         B, N = gt_masks.shape
-        num_instances = torch.unique(gt_masks).shape[0]
+        # num_instances = torch.unique(gt_masks).shape[0]
 
         bg_color = 1
 
@@ -1208,10 +1262,11 @@ class MaskTrainer(Trainer):
         # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
     
         pred_masks = outputs['instance_mask_logits'] # [B, N, num_instances]
-        pred_masks_flattened = pred_masks.view(-1, num_instances) # [B*N, num_instances]
+        pred_masks_flattened = pred_masks.view(-1, self.num_instances) # [B*N, num_instances]
         gt_masks_flattened = gt_masks.view(-1) # [B*N]
 
         # CrossEntropy loss
+        
         loss = self.criterion(pred_masks_flattened, gt_masks_flattened) # [B, N], loss fn with reduction='none'
 
         # patch-based rendering
@@ -1363,6 +1418,9 @@ class MaskTrainer(Trainer):
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_depth.png'), pred_depth)
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask.png'), pred_mask)
+
+                    mask_rgb = self.color_map[pred_mask.flatten()].reshape(pred_mask.shape + (3,))
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask_rgb.png'), cv2.cvtColor(mask_rgb, cv2.COLOR_RGB2BGR))
 
                 pbar.update(loader.batch_size)
         

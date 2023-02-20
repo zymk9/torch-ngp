@@ -159,6 +159,10 @@ class NeRFDataset:
         else:
             # we have to actually read an image to get H and W later.
             self.H = self.W = None
+
+        if 'room_bbox' in transform:
+            room_bbox = np.array(transform['room_bbox'])
+            self.offset = -(room_bbox[0] + room_bbox[1]) * 0.5 * self.scale
         
         # read images
         frames = transform["frames"]
@@ -373,6 +377,17 @@ class NeRFMaskDataset:
             # we have to actually read an image to get H and W later.
             self.H = self.W = None
         
+        # find number of instances in this scene
+        if 'bounding_boxes' in transform:
+            # TODO: instance id might not be consecutive.
+            self.num_instances = len(transform['bounding_boxes']) + 1 # +1 for the background
+        else:
+            raise RuntimeError('Failed to load number of instances, please check the transforms.json!')
+
+        if 'room_bbox' in transform:
+            room_bbox = np.array(transform['room_bbox'])
+            self.offset = -(room_bbox[0] + room_bbox[1]) * 0.5 * self.scale
+        
         # read images
         frames = transform["frames"]
         
@@ -385,7 +400,8 @@ class NeRFMaskDataset:
             rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
             slerp = Slerp([0, 1], rots)
 
-            self.images = None
+            self.masks = None
+            self.poses = []
             for i in range(n_test + 1):
                 ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
                 pose = np.eye(4, dtype=np.float32)
@@ -406,6 +422,10 @@ class NeRFMaskDataset:
 
                 mask_data = h5py.File(f_path, 'r')
                 mask = np.array(mask_data['cp_instance_id_segmaps'][:])
+
+                assert mask.max() < self.num_instances, \
+                    f'Instance id {mask.max()} exceeds the number of instances {self.num_instances - 1}'
+
                 if self.H is None or self.W is None:
                     self.H = mask.shape[0] // downscale
                     self.W = mask.shape[1] // downscale
@@ -439,12 +459,7 @@ class NeRFMaskDataset:
         if self.preload:
             self.poses = self.poses.to(self.device)
             if self.masks is not None:
-                # TODO: linear use pow, but pow for half is only available for torch >= 1.10 ?
-                if self.fp16 and self.opt.color_space != 'linear':
-                    dtype = torch.half
-                else:
-                    dtype = torch.float
-                self.masks = self.masks.to(dtype).to(self.device)
+                self.masks = self.masks.to(torch.long).to(self.device)
             if self.error_map is not None:
                 self.error_map = self.error_map.to(self.device)
 
@@ -520,5 +535,5 @@ class NeRFMaskDataset:
             size += size // self.rand_pose # index >= size means we use random pose.
         loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
         loader._data = self # an ugly fix... we need to access error_map & poses in trainer.
-        loader.has_gt = self.images is not None
+        loader.has_gt = self.masks is not None
         return loader
