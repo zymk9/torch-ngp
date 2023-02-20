@@ -135,6 +135,21 @@ if __name__ == '__main__':
         else:
             metrics.append(MeanIoUMeter())
 
+        test_loader = Dataset_(opt, device=device, type='test').dataloader()
+        num_instances = test_loader._data.num_instances if opt.train_mask else None
+
+        model = NeRFNetwork(
+            encoding="hashgrid",
+            bound=opt.bound,
+            cuda_ray=opt.cuda_ray,
+            density_scale=1,
+            min_near=opt.min_near,
+            density_thresh=opt.density_thresh,
+            bg_radius=opt.bg_radius,
+            num_instances=num_instances,
+        )
+        print(model)
+
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, 
                            fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)                         
 
@@ -143,8 +158,6 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            test_loader = Dataset_(opt, device=device, type='test').dataloader()
-
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
     

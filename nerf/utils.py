@@ -1237,6 +1237,12 @@ class MaskTrainer(Trainer):
 
         self.num_instances = self.model.num_instances
 
+        # freeze rgb and density
+        self.model.encoder.requires_grad_(False)
+        self.model.sigma_net.requires_grad_(False)
+        self.model.encoder_dir.requires_grad_(False)
+        self.model.color_net.requires_grad_(False)
+
     ### ------------------------------
 
     def train_step(self, data):
@@ -1412,6 +1418,9 @@ class MaskTrainer(Trainer):
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_depth.png'), pred_depth)
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask.png'), pred_mask)
+
+                    mask_rgb = self.color_map[pred_mask.flatten()].reshape(pred_mask.shape + (3,))
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask_rgb.png'), cv2.cvtColor(mask_rgb, cv2.COLOR_RGB2BGR))
 
                 pbar.update(loader.batch_size)
         
