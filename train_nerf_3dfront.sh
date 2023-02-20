@@ -8,4 +8,6 @@ python3 main_nerf_mask.py \
 --workspace ./workspace/3dfront_nerf/3dfront_0019_00 \
 --iters 10000 \
 --lr 1e-2 \
---cuda_ray
+--cuda_ray \
+--dataset_name 3dfront \
+--wandb

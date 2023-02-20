@@ -20,3 +20,4 @@ neus/
 *_render
 workspace
 *.sh
+wandb

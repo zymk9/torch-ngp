@@ -32,6 +32,9 @@ from packaging import version as pver
 import lpips
 from torchmetrics.functional import structural_similarity_index_measure
 
+import wandb
+from copy import deepcopy
+
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
     if pver.parse(torch.__version__) < pver.parse('1.10'):
@@ -244,6 +247,9 @@ class MeanIoUMeter:
 
     def report(self):
         return f'mIoU = {self.measure():.6f}'
+    
+    def name(self):
+        return 'mIoU'
 
 
 class PSNRMeter:
@@ -282,6 +288,9 @@ class PSNRMeter:
     def report(self):
         return f'PSNR = {self.measure():.6f}'
 
+    def name(self):
+        return 'PSNR'
+
 
 class SSIMMeter:
     def __init__(self, device=None):
@@ -318,6 +327,9 @@ class SSIMMeter:
 
     def report(self):
         return f'SSIM = {self.measure():.6f}'
+    
+    def name(self):
+        return 'SSIM'
 
 
 class LPIPSMeter:
@@ -355,6 +367,9 @@ class LPIPSMeter:
 
     def report(self):
         return f'LPIPS ({self.net}) = {self.measure():.6f}'
+
+    def name(self):
+        return 'LPIPS'
 
 class Trainer(object):
     def __init__(self, 
@@ -492,6 +507,15 @@ class Trainer(object):
             self.clip_loss = CLIPLoss(self.device)
             self.clip_loss.prepare_text([self.opt.clip_text]) # only support one text prompt now...
 
+        # wandb
+        if opt.wandb:
+            if opt.train_mask:
+                project_name = f'torch-ngp_mask_{opt.dataset_name}' 
+            else:
+                project_name = f'torch-ngp_{opt.dataset_name}'
+                    
+            wandb.init(project=project_name, entity='nerf-rpn-2022', name=opt.workspace.split('/')[-1])
+            wandb.config = deepcopy(opt)
 
     def __del__(self):
         if self.log_ptr: 
@@ -931,6 +955,16 @@ class Trainer(object):
                 else:
                     pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
                 pbar.update(loader.batch_size)
+            
+                if self.opt.wandb:
+                    wandb.log({
+                        'lr': self.optimizer.param_groups[0]['lr'],
+                        'loss_val': loss_val,
+                        'loss_avg': total_loss / self.local_step,
+                        'epoch': self.epoch,
+                        'local_step': self.local_step,
+                        'global_step': self.global_step,
+                    })
 
         if self.ema is not None:
             self.ema.update()
@@ -1045,6 +1079,10 @@ class Trainer(object):
             else:
                 self.stats["results"].append(average_loss) # if no metric, choose best by min loss
 
+            results = {}
+            for metric in self.metrics:
+                results.update({metric.name(): metric.measure()})
+            
             for metric in self.metrics:
                 self.log(metric.report(), style="blue")
                 if self.use_tensorboardX:
@@ -1055,6 +1093,9 @@ class Trainer(object):
             self.ema.restore()
 
         self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+
+        if self.opt.wandb:
+            wandb.log(results, commit=True)
 
     def save_checkpoint(self, name=None, full=False, best=False, remove_old=True):
 
