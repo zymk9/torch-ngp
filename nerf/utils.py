@@ -396,6 +396,7 @@ class Trainer(object):
                  use_tensorboardX=True, # whether to use tensorboard for logging
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
                  load_model_only=False, # if True, will not load optimizer, scheduler, etc. 
+                 mask3d_loss_weight=0.0, # weight of mask3d loss
                  ):
         
         self.name = name
@@ -416,6 +417,7 @@ class Trainer(object):
         self.use_tensorboardX = use_tensorboardX
         self.time_stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
         self.scheduler_update_every_step = scheduler_update_every_step
+        self.mask3d_loss_weight = mask3d_loss_weight
         self.device = device if device is not None else torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
         self.console = Console()
 
@@ -1245,6 +1247,18 @@ class MaskTrainer(Trainer):
 
     ### ------------------------------
 
+    def mask3d_loss(self, data):
+        coords = data['mask3d_coords'] # [N, 3]
+        labels = data['mask3d_labels'] # [N]
+
+        density_out = self.model.density(coords)
+        geo_feat = density_out['geo_feat']
+
+        mask_logits = self.model.mask(coords, geo_feat=geo_feat)
+        mask_loss = self.criterion(mask_logits, labels)
+
+        return mask_loss
+
     def train_step(self, data):
 
         rays_o = data['rays_o'] # [B, N, 3]
@@ -1318,6 +1332,11 @@ class MaskTrainer(Trainer):
         # loss_ws = - 1e-1 * pred_weights_sum * torch.log(pred_weights_sum) # entropy to encourage weights_sum to be 0 or 1.
         # loss = loss + loss_ws.mean()
 
+        # 3d mask constraints
+        if self.mask3d_loss_weight > 0:
+            mask3d_loss = self.mask3d_loss(data)
+            loss = loss + mask3d_loss.mean() * self.mask3d_loss_weight
+
         return pred_masks, gt_masks, loss
     
     def eval_step(self, data):
@@ -1343,6 +1362,10 @@ class MaskTrainer(Trainer):
         gt_masks_flattened = gt_masks.view(-1) # [B*H*W]
 
         loss = self.criterion(pred_masks_flattened, gt_masks_flattened).mean()
+
+        if self.mask3d_loss_weight > 0:
+            mask3d_loss = self.mask3d_loss(data)
+            loss = loss + mask3d_loss.mean() * self.mask3d_loss_weight
 
         pred_masks = torch.softmax(pred_masks, dim=-1) # [B, H, W, num_instances]
         pred_masks = pred_masks.argmax(dim=-1) # [B, H, W]
