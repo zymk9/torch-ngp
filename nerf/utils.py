@@ -396,7 +396,6 @@ class Trainer(object):
                  use_tensorboardX=True, # whether to use tensorboard for logging
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
                  load_model_only=False, # if True, will not load optimizer, scheduler, etc. 
-                 mask3d_loss_weight=0.0, # weight of mask3d loss
                  ):
         
         self.name = name
@@ -417,7 +416,6 @@ class Trainer(object):
         self.use_tensorboardX = use_tensorboardX
         self.time_stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
         self.scheduler_update_every_step = scheduler_update_every_step
-        self.mask3d_loss_weight = mask3d_loss_weight
         self.device = device if device is not None else torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
         self.console = Console()
 
@@ -1259,6 +1257,31 @@ class MaskTrainer(Trainer):
 
         return mask_loss
 
+    def label_regularization(self, depth, pred_masks):
+        '''
+        depth: [B, N]
+        pred_masks: [B, N, num_instances]
+        '''
+        pred_masks = pred_masks.view(-1, self.opt.patch_size, self.opt.patch_size, 
+            self.num_instances).permute(0, 3, 1, 2).contiguous() # [B, num_instances, patch_size, patch_size]
+
+        diff_x = pred_masks[:, :, :, 1:] - pred_masks[:, :, :, :-1]
+        diff_y = pred_masks[:, :, 1:, :] - pred_masks[:, :, :-1, :]
+
+        depth = depth.view(-1, self.opt.patch_size, self.opt.patch_size) # [B, patch_size, patch_size]
+
+        depth_diff_x = depth[:, :, 1:] - depth[:, :, :-1]
+        depth_diff_y = depth[:, 1:, :] - depth[:, :-1, :]
+        weight_x = torch.exp(-(depth_diff_x * depth_diff_x)).unsqueeze(1).expand_as(diff_x)
+        weight_y = torch.exp(-(depth_diff_y * depth_diff_y)).unsqueeze(1).expand_as(diff_y)
+
+        diff_x = diff_x * diff_x * weight_x
+        diff_y = diff_y * diff_y * weight_y
+
+        smoothness_loss = torch.sum(diff_x) / torch.sum(weight_x) + torch.sum(diff_y) / torch.sum(weight_y)
+
+        return smoothness_loss
+
     def train_step(self, data):
 
         rays_o = data['rays_o'] # [B, N, 3]
@@ -1324,6 +1347,9 @@ class MaskTrainer(Trainer):
 
         loss = loss.mean()
 
+        if self.opt.label_regularization_weight > 0:
+            loss = loss + self.label_regularization(outputs['depth'], pred_masks) * self.opt.label_regularization_weight
+
         pred_masks = torch.softmax(pred_masks, dim=-1) # [B, N, num_instances]
         pred_masks = pred_masks.argmax(dim=-1) # [B, N]
 
@@ -1333,9 +1359,9 @@ class MaskTrainer(Trainer):
         # loss = loss + loss_ws.mean()
 
         # 3d mask constraints
-        if self.mask3d_loss_weight > 0:
+        if self.opt.mask3d_loss_weight > 0:
             mask3d_loss = self.mask3d_loss(data)
-            loss = loss + mask3d_loss.mean() * self.mask3d_loss_weight
+            loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
 
         return pred_masks, gt_masks, loss
     
@@ -1363,9 +1389,12 @@ class MaskTrainer(Trainer):
 
         loss = self.criterion(pred_masks_flattened, gt_masks_flattened).mean()
 
-        if self.mask3d_loss_weight > 0:
+        if self.opt.label_regularization_weight > 0:
+            loss = loss + self.label_regularization(outputs['depth'], pred_masks) * self.opt.label_regularization_weight
+
+        if self.opt.mask3d_loss_weight > 0:
             mask3d_loss = self.mask3d_loss(data)
-            loss = loss + mask3d_loss.mean() * self.mask3d_loss_weight
+            loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
 
         pred_masks = torch.softmax(pred_masks, dim=-1) # [B, H, W, num_instances]
         pred_masks = pred_masks.argmax(dim=-1) # [B, H, W]
