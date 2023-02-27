@@ -34,6 +34,7 @@ if __name__ == '__main__':
     parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
     parser.add_argument('--patch_size', type=int, default=1, help="[experimental] render patches in training, so as to apply LPIPS loss. 1 means disabled, use [64, 32, 16] to enable")
+    parser.add_argument('--gpu', type=int, default=0, help="gpu id")
 
     ### network backbone options
     parser.add_argument('--fp16', action='store_true', help="use amp mixed precision training")
@@ -67,12 +68,17 @@ if __name__ == '__main__':
 
     ### mask training options
     parser.add_argument('--train_mask', action='store_true', help="train mask, use only after rgbsigma is converged")
+    parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
+    parser.add_argument('--mask3d_loss_weight', type=float, default=1.0, help="3d mask loss weight")
+    parser.add_argument('--label_regularization_weight', type=float, default=1.0, help="label regularization weight")
 
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
     parser.add_argument('--dataset_name', type=str, default='default', choices=['3dfront', 'scannet', 'hypersim'], 
                         help='A dataset name for wandb logging')
 
     opt = parser.parse_args()
+
+    torch.cuda.set_device(opt.gpu)
 
     if opt.O:
         opt.fp16 = True
@@ -100,7 +106,12 @@ if __name__ == '__main__':
             from nerf.network_mask import NeRFNetwork
         else:
             from nerf.network import NeRFNetwork
-            
+
+    if opt.mask3d is None:
+        opt.mask3d_loss_weight = 0
+
+    if opt.train_mask and opt.label_regularization_weight > 0:
+        assert opt.patch_size > 1, "label regularization only works with patch-based training"
 
     print(opt)
     
@@ -135,7 +146,7 @@ if __name__ == '__main__':
         else:
             metrics.append(MeanIoUMeter())
 
-        test_loader = Dataset_(opt, device=device, type='test').dataloader()
+        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2).dataloader()
         num_instances = test_loader._data.num_instances if opt.train_mask else None
 
         model = NeRFNetwork(
@@ -161,7 +172,7 @@ if __name__ == '__main__':
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
     
-            trainer.test(test_loader, write_video=True) # test and save video
+            trainer.test(test_loader, write_video=False) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)
     
@@ -195,7 +206,7 @@ if __name__ == '__main__':
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
                            scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, 
-                           eval_interval=10, load_model_only=opt.load_model_only)
+                           eval_interval=10, load_model_only=opt.load_model_only,)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)

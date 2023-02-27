@@ -339,7 +339,7 @@ class NeRFDataset:
 
 
 class NeRFMaskDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test=10):
+    def __init__(self, opt, device, type='train', downscale=1, n_test_per_pose=10, n_test_poses=10):
         super().__init__()
         
         self.opt = opt
@@ -357,6 +357,7 @@ class NeRFMaskDataset:
         self.num_rays = self.opt.num_rays if self.training else -1
 
         self.rand_pose = opt.rand_pose
+        self.mask3d = opt.mask3d if self.training or self.type == 'val' else None
 
         if type == 'trainval' or type == 'test': # in test mode, interpolate new frames
             with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
@@ -364,6 +365,9 @@ class NeRFMaskDataset:
             with open(os.path.join(self.root_path, f'val_transforms.json'), 'r') as f:
                 transform_val = json.load(f)
             transform['frames'].extend(transform_val['frames'])
+        elif type == 'test_all':
+            with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
+                transform = json.load(f)
         # only load one specified split
         else:
             with open(os.path.join(self.root_path, f'{type}_transforms.json'), 'r') as f:
@@ -387,6 +391,32 @@ class NeRFMaskDataset:
         if 'room_bbox' in transform:
             room_bbox = np.array(transform['room_bbox'])
             self.offset = -(room_bbox[0] + room_bbox[1]) * 0.5 * self.scale
+
+        # read 3d mask constraints
+        if self.mask3d is not None:
+            assert 'room_bbox' in transform, '3d mask requires room_bbox in transforms.json!'
+
+            mask3d = np.load(self.mask3d)
+            if mask3d.max() >= self.num_instances:
+                raise RuntimeError(f'3d mask has too many instances {mask3d.max()}, '
+                    f'only {self.num_instances-1} instances are loaded!')
+
+            assert len(mask3d.shape) == 3, f'3d mask should be [W, L, H], got {mask3d.shape}'
+
+            res = mask3d.shape
+            x = np.linspace(room_bbox[0][0], room_bbox[1][0], res[0]) * self.scale + self.offset[0]
+            y = np.linspace(room_bbox[0][1], room_bbox[1][1], res[1]) * self.scale + self.offset[1]
+            z = np.linspace(room_bbox[0][2], room_bbox[1][2], res[2]) * self.scale + self.offset[2]
+            x, y, z = np.meshgrid(x, y, z, indexing='ij')
+            coords = np.stack([x, y, z], -1).reshape(-1, 3)
+
+            mask3d = mask3d.reshape(-1)
+            keep = mask3d > 0
+            mask3d = mask3d[keep]
+            coords = coords[keep]
+            
+            self.mask3d_labels = torch.from_numpy(mask3d).to(torch.long).to(device)
+            self.mask3d_coords = torch.from_numpy(coords).to(torch.float).to(device)
         
         # read images
         frames = transform["frames"]
@@ -394,20 +424,24 @@ class NeRFMaskDataset:
         # for colmap, manually interpolate a test set.
         if type == 'test':
             # choose two random poses, and interpolate between.
-            f0, f1 = np.random.choice(frames, 2, replace=False)
-            pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
-            pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
-            rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
-            slerp = Slerp([0, 1], rots)
+            f = np.random.choice(frames, n_test_poses, replace=False)
+            poses = [nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) for f0 in f]
 
             self.masks = None
             self.poses = []
-            for i in range(n_test + 1):
-                ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
-                pose = np.eye(4, dtype=np.float32)
-                pose[:3, :3] = slerp(ratio).as_matrix()
-                pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
-                self.poses.append(pose)
+
+            for k in range(len(poses) - 1):
+                pose0 = poses[k]
+                pose1 = poses[k + 1]
+                rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
+                slerp = Slerp([0, 1], rots)
+    
+                for i in range(n_test_per_pose + 1):
+                    ratio = np.sin(((i / n_test_per_pose) - 0.5) * np.pi) * 0.5 + 0.5
+                    pose = np.eye(4, dtype=np.float32)
+                    pose[:3, :3] = slerp(ratio).as_matrix()
+                    pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+                    self.poses.append(pose)
         else:
             self.poses = []
             self.masks = []
@@ -521,6 +555,10 @@ class NeRFMaskDataset:
             if self.training:
                 masks = torch.gather(masks.view(B, -1), 1, rays['inds']) # [B, N]
             results['masks'] = masks
+
+        if self.mask3d is not None:
+            results['mask3d_coords'] = self.mask3d_coords
+            results['mask3d_labels'] = self.mask3d_labels 
         
         # need inds to update error_map
         if error_map is not None:
