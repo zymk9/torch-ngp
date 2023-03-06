@@ -1304,7 +1304,12 @@ class MaskTrainer(Trainer):
 
         # CrossEntropy loss
         
-        loss = self.criterion(pred_masks_flattened, gt_masks_flattened) # [B, N], loss fn with reduction='none'
+        # TODO: this breaks error map as loss is no longer [B, N]
+        labeled = gt_masks_flattened != -1  # only compute loss for labeled pixels
+        if labeled.sum() > 0:
+            loss = self.criterion(pred_masks_flattened[labeled], gt_masks_flattened[labeled]) # [B*N], loss fn with reduction='none'
+        else:
+            loss = torch.tensor(0).to(self.device)
 
         # patch-based rendering
         # if self.opt.patch_size > 1:
@@ -1387,7 +1392,8 @@ class MaskTrainer(Trainer):
         pred_masks_flattened = pred_masks.view(-1, pred_masks.shape[-1]) # [B*H*W, num_instances]
         gt_masks_flattened = gt_masks.view(-1) # [B*H*W]
 
-        loss = self.criterion(pred_masks_flattened, gt_masks_flattened).mean()
+        labeled = gt_masks_flattened != -1  # only compute loss for labeled pixels
+        loss = self.criterion(pred_masks_flattened[labeled], gt_masks_flattened[labeled]).mean()
 
         if self.opt.label_regularization_weight > 0:
             loss = loss + self.label_regularization(outputs['depth'], pred_masks) * self.opt.label_regularization_weight
