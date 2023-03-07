@@ -1309,7 +1309,7 @@ class MaskTrainer(Trainer):
         if labeled.sum() > 0:
             loss = self.criterion(pred_masks_flattened[labeled], gt_masks_flattened[labeled]) # [B*N], loss fn with reduction='none'
         else:
-            loss = torch.tensor(0).to(self.device)
+            loss = torch.tensor(0).to(pred_masks_flattened.dtype).to(self.device)
 
         # patch-based rendering
         # if self.opt.patch_size > 1:
