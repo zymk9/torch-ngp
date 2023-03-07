@@ -1,7 +1,7 @@
 import torch
 import argparse
 
-from nerf.provider import NeRFMaskDataset, NeRFDataset
+from nerf.provider import NeRFMaskDataset, NeRFDataset, NeRFSemanticDataset
 # from nerf.gui import NeRFGUI
 from nerf.utils import *
 
@@ -68,9 +68,11 @@ if __name__ == '__main__':
 
     ### mask training options
     parser.add_argument('--train_mask', action='store_true', help="train mask, use only after rgbsigma is converged")
+    parser.add_argument('--train_semantic', action='store_true', help="train Semantic-NeRF from scratch.")
     parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
     parser.add_argument('--mask3d_loss_weight', type=float, default=1.0, help="3d mask loss weight")
     parser.add_argument('--label_regularization_weight', type=float, default=1.0, help="label regularization weight")
+    parser.add_argument('--semantic_loss_weight', type=float, default=1.0, help="semantic loss weight")
 
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
     parser.add_argument('--dataset_name', type=str, default='default', choices=['3dfront', 'scannet', 'hypersim'], 
@@ -127,6 +129,7 @@ if __name__ == '__main__':
     #     bg_radius=opt.bg_radius,
     # )
     # print(model)
+    print('check1')
 
     criterion = torch.nn.CrossEntropyLoss(reduction='none') if opt.train_mask else torch.nn.MSELoss(reduction='none') 
     # criterion = torch.nn.MSELoss(reduction='none')
@@ -136,7 +139,13 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     Trainer_ = MaskTrainer if opt.train_mask else Trainer
-    Dataset_ = NeRFMaskDataset if opt.train_mask else NeRFDataset
+    if opt.train_mask:
+        if opt.train_semantic:
+            Dataset_ = NeRFSemanticDataset
+        else:
+            Dataset_ = NeRFMaskDataset
+    else:
+        Dataset_ = NeRFDataset
 
     if opt.test:
         
@@ -147,6 +156,7 @@ if __name__ == '__main__':
             metrics.append(MeanIoUMeter())
 
         test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2).dataloader()
+        # TODO: verify the number of semantics
         num_instances = test_loader._data.num_instances if opt.train_mask else None
 
         model = NeRFNetwork(
@@ -162,7 +172,7 @@ if __name__ == '__main__':
         print(model)
 
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, 
-                           fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)                         
+                           fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only,)                         
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer)
@@ -206,7 +216,7 @@ if __name__ == '__main__':
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
                            scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, 
-                           eval_interval=10, load_model_only=opt.load_model_only,)
+                           eval_interval=5, load_model_only=opt.load_model_only,)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)

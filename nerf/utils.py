@@ -396,6 +396,8 @@ class Trainer(object):
                  use_tensorboardX=True, # whether to use tensorboard for logging
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
                  load_model_only=False, # if True, will not load optimizer, scheduler, etc. 
+                 rgb_crit=torch.nn.MSELoss(reduction='none'), # rgb loss function, for semantic-nerf
+                 semantic_crit=torch.nn.CrossEntropyLoss(reduction='none'), # semantic loss function, for semantic-nerf
                  ):
         
         self.name = name
@@ -428,6 +430,8 @@ class Trainer(object):
         if isinstance(criterion, nn.Module):
             criterion.to(self.device)
         self.criterion = criterion
+        self.rgb_crit = rgb_crit.to(self.device)
+        self.semantic_crit = semantic_crit.to(self.device)
 
         # optionally use LPIPS loss for patch-based training
         if self.opt.patch_size > 1:
@@ -508,13 +512,8 @@ class Trainer(object):
             self.clip_loss.prepare_text([self.opt.clip_text]) # only support one text prompt now...
 
         # wandb
-        if opt.wandb:
-            if opt.train_mask:
-                project_name = f'torch-ngp_mask_{opt.dataset_name}' 
-            else:
-                project_name = f'torch-ngp_{opt.dataset_name}'
-                    
-            wandb.init(project=project_name, entity='nerf-rpn-2022', name=opt.workspace.split('/')[-1])
+        if opt.wandb:          
+            wandb.init(project='semantic_nerf', entity='nerf-rpn-2022')
             wandb.config = deepcopy(opt)
 
     def __del__(self):
@@ -1238,10 +1237,10 @@ class MaskTrainer(Trainer):
         self.num_instances = self.model.num_instances
 
         # freeze rgb and density
-        self.model.encoder.requires_grad_(False)
-        self.model.sigma_net.requires_grad_(False)
-        self.model.encoder_dir.requires_grad_(False)
-        self.model.color_net.requires_grad_(False)
+        # self.model.encoder.requires_grad_(False)
+        # self.model.sigma_net.requires_grad_(False)
+        # self.model.encoder_dir.requires_grad_(False)
+        # self.model.color_net.requires_grad_(False)
 
     ### ------------------------------
 
@@ -1287,7 +1286,7 @@ class MaskTrainer(Trainer):
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
 
-        gt_masks = data['masks'] # [B, N], N=H*W?
+        gt_masks = data['masks'] # [B, N],
 
         B, N = gt_masks.shape
         # num_instances = torch.unique(gt_masks).shape[0]
@@ -1297,60 +1296,45 @@ class MaskTrainer(Trainer):
         outputs = self.model.render(rays_o, rays_d, render_mask=True, staged=False, bg_color=bg_color, perturb=True, 
                                     force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
         # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
-    
+
+        # mask loss
         pred_masks = outputs['instance_mask_logits'] # [B, N, num_instances]
         pred_masks_flattened = pred_masks.view(-1, self.num_instances) # [B*N, num_instances]
         gt_masks_flattened = gt_masks.view(-1) # [B*N]
-
-        # CrossEntropy loss
         
         # TODO: this breaks error map as loss is no longer [B, N]
         labeled = gt_masks_flattened != -1  # only compute loss for labeled pixels
         if labeled.sum() > 0:
-            loss = self.criterion(pred_masks_flattened[labeled], gt_masks_flattened[labeled]) # [B*N], loss fn with reduction='none'
+            semantic_loss = self.semantic_crit(pred_masks_flattened[labeled], gt_masks_flattened[labeled]) # [B*N], loss fn with reduction='none'
         else:
-            loss = torch.tensor(0).to(self.device)
+            semantic_loss = torch.tensor(0).to(self.device)
+        semantic_loss = semantic_loss.mean()
 
-        # patch-based rendering
-        # if self.opt.patch_size > 1:
-        #     gt_masks = gt_masks.view(-1, self.opt.patch_size, self.opt.patch_size).contiguous()
-        #     pred_masks = pred_masks.view(-1, self.opt.patch_size, self.opt.patch_size, num_instances).permute(0, 3, 1, 2).contiguous()
+        # rgb loss
+        images = data['images'] # [B, N, 3/4]
+        B, N, C = images.shape
 
-        #     # torch_vis_2d(gt_rgb[0])
-        #     # torch_vis_2d(pred_rgb[0])
+        if self.opt.color_space == 'linear':
+            images[..., :3] = srgb_to_linear(images[..., :3])
 
-        #     # LPIPS loss [not useful...]
-        #     loss = loss + 1e-3 * self.criterion_lpips(gt_masks, pred_masks)
+        if C == 3 or self.model.bg_radius > 0:
+            bg_color = 1
+        # train with random background color if not using a bg model and has alpha channel.
+        else:
+            #bg_color = torch.ones(3, device=self.device) # [3], fixed white background
+            #bg_color = torch.rand(3, device=self.device) # [3], frame-wise random.
+            bg_color = torch.rand_like(images[..., :3]) # [N, 3], pixel-wise random.
 
-        # special case for CCNeRF's rank-residual training
-        # if len(loss.shape) == 3: # [K, B, N]
-        #     loss = loss.mean(0)
+        if C == 4:
+            gt_rgb = images[..., :3] * images[..., 3:] + bg_color * (1 - images[..., 3:])
+        else:
+            gt_rgb = images
 
-        # update error_map
-        if self.error_map is not None:
-            index = data['index'] # [B]
-            inds = data['inds_coarse'] # [B, N]
-
-            # take out, this is an advanced indexing and the copy is unavoidable.
-            error_map = self.error_map[index] # [B, H * W]
-
-            # [debug] uncomment to save and visualize error map
-            # if self.global_step % 1001 == 0:
-            #     tmp = error_map[0].view(128, 128).cpu().numpy()
-            #     print(f'[write error map] {tmp.shape} {tmp.min()} ~ {tmp.max()}')
-            #     tmp = (tmp - tmp.min()) / (tmp.max() - tmp.min())
-            #     cv2.imwrite(os.path.join(self.workspace, f'{self.global_step}.jpg'), (tmp * 255).astype(np.uint8))
-
-            error = loss.detach().to(error_map.device) # [B, N], already in [0, 1]
-            
-            # ema update
-            ema_error = 0.1 * error_map.gather(1, inds) + 0.9 * error
-            error_map.scatter_(1, inds, ema_error)
-
-            # put back
-            self.error_map[index] = error_map
-
-        loss = loss.mean()
+        pred_rgb = outputs['image']
+        rgb_loss = self.rgb_crit(pred_rgb, gt_rgb).mean(-1) # [B, N, 3] --> [B, N]
+        rgb_loss = rgb_loss.mean()
+    
+        loss = rgb_loss + self.opt.semantic_loss_weight * semantic_loss
 
         if self.opt.label_regularization_weight > 0:
             loss = loss + self.label_regularization(outputs['depth'], pred_masks) * self.opt.label_regularization_weight
@@ -1375,6 +1359,7 @@ class MaskTrainer(Trainer):
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
         masks = data['masks'] # [B, H, W]
+        gt_rgb = data['images']
         B, H, W = masks.shape
 
         # eval with fixed background color
@@ -1393,7 +1378,12 @@ class MaskTrainer(Trainer):
         gt_masks_flattened = gt_masks.view(-1) # [B*H*W]
 
         labeled = gt_masks_flattened != -1  # only compute loss for labeled pixels
-        loss = self.criterion(pred_masks_flattened[labeled], gt_masks_flattened[labeled]).mean()
+        semantic_loss = self.semantic_crit(pred_masks_flattened[labeled], gt_masks_flattened[labeled]).mean()
+
+        pred_rgb = outputs['image'].reshape(B, H, W, 3)
+        rgb_loss = self.rgb_crit(pred_rgb, gt_rgb).mean() # [B, N, 3] --> [B, N]
+
+        loss = rgb_loss + self.opt.semantic_loss_weight * semantic_loss
 
         if self.opt.label_regularization_weight > 0:
             loss = loss + self.label_regularization(outputs['depth'], pred_masks) * self.opt.label_regularization_weight
