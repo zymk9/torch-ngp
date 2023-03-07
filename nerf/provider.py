@@ -382,9 +382,13 @@ class NeRFMaskDataset:
             self.H = self.W = None
         
         # find number of instances in this scene
-        if 'bounding_boxes' in transform:
-            # TODO: instance id might not be consecutive.
-            self.num_instances = len(transform['bounding_boxes']) + 1 # +1 for the background
+        # if 'bounding_boxes' in transform:
+        #     # TODO: instance id might not be consecutive.
+        #     self.num_instances = len(transform['bounding_boxes']) + 1 # +1 for the background
+        # else:
+        #     raise RuntimeError('Failed to load number of instances, please check the transforms.json!')
+        if 'num_instances' in transform:
+            self.num_instances = transform['num_instances'] + 1 # +1 for the background
         else:
             raise RuntimeError('Failed to load number of instances, please check the transforms.json!')
 
@@ -454,8 +458,8 @@ class NeRFMaskDataset:
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
-                mask_data = h5py.File(f_path, 'r')
-                mask = np.array(mask_data['cp_instance_id_segmaps'][:])
+                with h5py.File(f_path, 'r') as mask_data:
+                    mask = np.array(mask_data['cp_instance_id_segmaps'][:])
 
                 assert mask.max() < self.num_instances, \
                     f'Instance id {mask.max()} exceeds the number of instances {self.num_instances - 1}'
