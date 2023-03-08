@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import dearpygui.dearpygui as dpg
 from scipy.spatial.transform import Rotation as R
+import matplotlib.pyplot as plt
 
 from .utils import *
 
@@ -71,7 +72,11 @@ class NeRFGUI:
         self.render_buffer = np.zeros((self.W, self.H, 3), dtype=np.float32)
         self.need_update = True # camera moved, should reset accumulation
         self.spp = 1 # sample per pixel
-        self.mode = 'image' # choose from ['image', 'depth']
+        self.mode = 'image' # choose from ['image', 'depth', 'mask']
+
+        self.colors = np.multiply([
+            plt.cm.get_cmap('gist_ncar', 37)((i * 7 + 5) % 37)[:3] for i in range(37)
+        ], 255).astype(np.uint8)
 
         self.dynamic_resolution = True
         self.downscale = 1
@@ -113,9 +118,14 @@ class NeRFGUI:
     def prepare_buffer(self, outputs):
         if self.mode == 'image':
             return outputs['image']
-        else:
+        elif self.mode == 'depth':
             return np.expand_dims(outputs['depth'], -1).repeat(3, -1)
-
+        else:
+            mask = outputs['mask']
+            mask_rgb = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+            for i in np.unique(mask):
+                mask_rgb[mask == i] = self.colors[i % len(self.colors)]
+            return mask_rgb
     
     def test_step(self):
         # TODO: seems we have to move data from GPU --> CPU --> GPU?

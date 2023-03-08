@@ -359,15 +359,25 @@ class NeRFMaskDataset:
         self.rand_pose = opt.rand_pose
         self.mask3d = opt.mask3d if self.training or self.type == 'val' else None
 
-        if type == 'trainval' or type == 'test': # in test mode, interpolate new frames
+        if type == 'trainval' or type == 'test' or type == 'test_all': # in test mode, interpolate new frames
             with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
                 transform = json.load(f)
             with open(os.path.join(self.root_path, f'val_transforms.json'), 'r') as f:
                 transform_val = json.load(f)
-            transform['frames'].extend(transform_val['frames'])
-        elif type == 'test_all':
-            with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
-                transform = json.load(f)
+            # transform['frames'].extend(transform_val['frames'])
+
+            file_paths = set()
+            for frame in transform['frames']:
+                file_paths.add(frame['file_path'])
+            for frame in transform_val['frames']:
+                if frame['file_path'] not in file_paths:
+                    transform['frames'].append(frame)
+
+            sort_key = lambda x: int(x['file_path'].split('/')[-1].split('.')[0])
+            transform['frames'] = sorted(transform['frames'], key=sort_key)
+        # elif type == 'test_all':
+        #     with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
+        #         transform = json.load(f)
         # only load one specified split
         else:
             with open(os.path.join(self.root_path, f'{type}_transforms.json'), 'r') as f:
