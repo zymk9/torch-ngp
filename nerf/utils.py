@@ -1721,18 +1721,16 @@ class SAMTrainer(Trainer):
 
         gt_features = data['features'] # [B, N], N=H*W?
 
-        B, N = gt_features.shape
+        B, N, _ = gt_features.shape
 
         bg_color = 1
 
-        outputs = self.model.render(rays_o, rays_d, render_mask=True, staged=False, bg_color=bg_color, perturb=True, 
+        outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
                                     force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
         # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
-    
         pred_features = outputs['sam_feature'] # [B, N, feature_dim]
 
         # MSE
-        
         loss = self.criterion(pred_features, gt_features).mean(-1) # [B, N, feature_dim] --> [B, N]
 
         # patch-based rendering
@@ -1800,7 +1798,7 @@ class SAMTrainer(Trainer):
         
         gt_masks = masks
         
-        outputs = self.model.render(rays_o, rays_d, render_mask=True, staged=True, 
+        outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=True, 
                                     bg_color=bg_color, perturb=False, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(B, H, W, 3)
@@ -1834,7 +1832,7 @@ class SAMTrainer(Trainer):
         if bg_color is not None:
             bg_color = bg_color.to(self.device)
 
-        outputs = self.model.render(rays_o, rays_d, render_mask=True, staged=True, 
+        outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=True, 
                                     bg_color=bg_color, perturb=perturb, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)

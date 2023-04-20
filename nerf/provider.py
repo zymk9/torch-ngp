@@ -783,8 +783,10 @@ class NeRFSAMDataset:
 
         if self.features is not None:
             features = self.features[index].to(self.device) # [B, H, W, C]
-            print(features.view(B, -1, self.feature_dim).shape)
-            print(rays['inds'].shape)
+            a = features.view(B, -1, self.feature_dim)[0,rays['inds'][0]]
+
+            
+
             if self.training:
                 features = torch.gather(features.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
             results['features'] = features

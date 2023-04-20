@@ -84,7 +84,7 @@ class NeRFNetwork(NeRFSAMRenderer):
         sam_net = []
         for l in range(num_layers_sam):
             if l == 0:
-                in_dim = self.in_dim_sam + self.geo_feat_dim
+                in_dim = self.in_dim_sam
             else:
                 in_dim = hidden_dim_sam
             
@@ -108,7 +108,7 @@ class NeRFNetwork(NeRFSAMRenderer):
             sam_dir_net =  []
             for l in range(num_layers_sam_dir):
                 if l == 0:
-                    in_dim = self.in_dim_dir + self.feature_dim
+                    in_dim = self.in_dim_sam_dir + self.hidden_dim_sam
                 else:
                     in_dim = hidden_dim_sam_dir
                 
@@ -276,13 +276,14 @@ class NeRFNetwork(NeRFSAMRenderer):
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
         output = torch.sigmoid(s_sam)
-        
+                
         if self.view_dependent:
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
-            for l in range(self.num_layers_color):
-                h_sam = self.color_net[l](h_sam)
-                if l != self.num_layers_color - 1:
+
+            for l in range(self.num_layers_sam_dir):
+                h_sam = self.sam_dir_net[l](h_sam)
+                if l != self.num_layers_sam_dir - 1:
                     h_sam = F.relu(h_sam, inplace=True)
             output = torch.sigmoid(h_sam)
             

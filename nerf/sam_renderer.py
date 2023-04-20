@@ -221,7 +221,6 @@ class NeRFSAMRenderer(NeRFRenderer):
         # tmp: reg loss in mip-nerf 360
         # z_vals_shifted = torch.cat([z_vals[..., 1:], sample_dist * torch.ones_like(z_vals[..., :1])], dim=-1)
         # mid_zs = (z_vals + z_vals_shifted) / 2 # [N, T]
-        # loss_dist = (torch.abs(mid_zs.unsqueeze(1) - mid_zs.unsqueeze(2)) * (weights.unsqueeze(1) * weights.unsqueeze(2))).sum() + 1/3 * ((z_vals_shifted - z_vals_shifted) * (weights ** 2)).sum()
 
         return {
             'depth': depth,
@@ -584,6 +583,5 @@ class NeRFSAMRenderer(NeRFRenderer):
             results['sam_feature'] = sam_feature
 
         else:
-            results = _run(rays_o, rays_d, sam_feature, **kwargs)
-
+            results = _run(rays_o, rays_d, render_feature, **kwargs)
         return results
