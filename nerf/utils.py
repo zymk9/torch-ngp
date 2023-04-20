@@ -1655,4 +1655,422 @@ class MaskTrainer(Trainer):
             self.ema.restore()
 
         self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+
+
+
+class SAMTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # TODO: overflow issue, currently just use the same color map as gt visualization
+        self.color_map = np.multiply([
+            plt.cm.get_cmap('gist_ncar', 37)((i * 7 + 5) % 37)[:3] for i in range(37)
+        ], 255).astype(np.uint8)
+
+        self.feature_dim = self.model.feature_dim
+
+        # freeze rgb and density
+        self.model.encoder.requires_grad_(False)
+        self.model.sigma_net.requires_grad_(False)
+        self.model.encoder_dir.requires_grad_(False)
+        self.model.color_net.requires_grad_(False)
+
+    ### ------------------------------
+
+    def mask3d_loss(self, data):
+        coords = data['mask3d_coords'] # [N, 3]
+        labels = data['mask3d_labels'] # [N]
+
+        density_out = self.model.density(coords)
+        geo_feat = density_out['geo_feat']
+
+        mask_logits = self.model.mask(coords, geo_feat=geo_feat)
+        mask_loss = self.criterion(mask_logits, labels)
+
+        return mask_loss
+
+    def label_regularization(self, depth, pred_masks):
+        '''
+        depth: [B, N]
+        pred_masks: [B, N, num_instances]
+        '''
+        pred_masks = pred_masks.view(-1, self.opt.patch_size, self.opt.patch_size, 
+            self.num_instances).permute(0, 3, 1, 2).contiguous() # [B, num_instances, patch_size, patch_size]
+
+        diff_x = pred_masks[:, :, :, 1:] - pred_masks[:, :, :, :-1]
+        diff_y = pred_masks[:, :, 1:, :] - pred_masks[:, :, :-1, :]
+
+        depth = depth.view(-1, self.opt.patch_size, self.opt.patch_size) # [B, patch_size, patch_size]
+
+        depth_diff_x = depth[:, :, 1:] - depth[:, :, :-1]
+        depth_diff_y = depth[:, 1:, :] - depth[:, :-1, :]
+        weight_x = torch.exp(-(depth_diff_x * depth_diff_x)).unsqueeze(1).expand_as(diff_x)
+        weight_y = torch.exp(-(depth_diff_y * depth_diff_y)).unsqueeze(1).expand_as(diff_y)
+
+        diff_x = diff_x * diff_x * weight_x
+        diff_y = diff_y * diff_y * weight_y
+
+        smoothness_loss = torch.sum(diff_x) / torch.sum(weight_x) + torch.sum(diff_y) / torch.sum(weight_y)
+
+        return smoothness_loss
+
+    def train_step(self, data):
+
+        rays_o = data['rays_o'] # [B, N, 3]
+        rays_d = data['rays_d'] # [B, N, 3]
+
+        gt_features = data['features'] # [B, N], N=H*W?
+
+        B, N = gt_features.shape
+
+        bg_color = 1
+
+        outputs = self.model.render(rays_o, rays_d, render_mask=True, staged=False, bg_color=bg_color, perturb=True, 
+                                    force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
+        # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
     
+        pred_features = outputs['sam_feature'] # [B, N, feature_dim]
+
+        # MSE
+        
+        loss = self.criterion(pred_features, gt_features).mean(-1) # [B, N, feature_dim] --> [B, N]
+
+        # patch-based rendering
+        if self.opt.patch_size > 1:
+            gt_features = gt_features.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
+            pred_features = pred_features.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
+
+            # torch_vis_2d(gt_rgb[0])
+            # torch_vis_2d(pred_rgb[0])
+
+            # LPIPS loss [not useful...]
+            loss = loss + 1e-3 * self.criterion_lpips(pred_features, gt_features)
+
+        # update error_map
+        if self.error_map is not None:
+            index = data['index'] # [B]
+            inds = data['inds_coarse'] # [B, N]
+
+            # take out, this is an advanced indexing and the copy is unavoidable.
+            error_map = self.error_map[index] # [B, H * W]
+
+            # [debug] uncomment to save and visualize error map
+            # if self.global_step % 1001 == 0:
+            #     tmp = error_map[0].view(128, 128).cpu().numpy()
+            #     print(f'[write error map] {tmp.shape} {tmp.min()} ~ {tmp.max()}')
+            #     tmp = (tmp - tmp.min()) / (tmp.max() - tmp.min())
+            #     cv2.imwrite(os.path.join(self.workspace, f'{self.global_step}.jpg'), (tmp * 255).astype(np.uint8))
+
+            error = loss.detach().to(error_map.device) # [B, N], already in [0, 1]
+            
+            # ema update
+            ema_error = 0.1 * error_map.gather(1, inds) + 0.9 * error
+            error_map.scatter_(1, inds, ema_error)
+
+            # put back
+            self.error_map[index] = error_map
+
+        loss = loss.mean()
+
+        if self.opt.label_regularization_weight > 0:
+            loss = loss + self.label_regularization(outputs['depth'], pred_features) * self.opt.label_regularization_weight
+        
+        
+        # extra loss
+        # pred_weights_sum = outputs['weights_sum'] + 1e-8
+        # loss_ws = - 1e-1 * pred_weights_sum * torch.log(pred_weights_sum) # entropy to encourage weights_sum to be 0 or 1.
+        # loss = loss + loss_ws.mean()
+
+        # 3d mask constraints
+        if self.opt.mask3d_loss_weight > 0:
+            mask3d_loss = self.mask3d_loss(data)
+            loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
+
+        return pred_features, gt_features, loss
+    
+    def eval_step(self, data):
+
+        rays_o = data['rays_o'] # [B, N, 3]
+        rays_d = data['rays_d'] # [B, N, 3]
+        masks = data['masks'] # [B, H, W]
+        B, H, W = masks.shape
+
+        # eval with fixed background color
+        bg_color = 1
+        
+        gt_masks = masks
+        
+        outputs = self.model.render(rays_o, rays_d, render_mask=True, staged=True, 
+                                    bg_color=bg_color, perturb=False, **vars(self.opt))
+
+        pred_rgb = outputs['image'].reshape(B, H, W, 3)
+        pred_depth = outputs['depth'].reshape(B, H, W)
+        pred_masks = outputs['instance_mask_logits'].reshape(B, H, W, -1)
+
+        pred_masks_flattened = pred_masks.view(-1, pred_masks.shape[-1]) # [B*H*W, num_instances]
+        gt_masks_flattened = gt_masks.view(-1) # [B*H*W]
+
+        labeled = gt_masks_flattened != -1  # only compute loss for labeled pixels
+        loss = self.criterion(pred_masks_flattened[labeled], gt_masks_flattened[labeled]).mean()
+
+        if self.opt.label_regularization_weight > 0:
+            loss = loss + self.label_regularization(outputs['depth'], pred_masks) * self.opt.label_regularization_weight
+
+        if self.opt.mask3d_loss_weight > 0:
+            mask3d_loss = self.mask3d_loss(data)
+            loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
+
+        pred_masks = torch.softmax(pred_masks, dim=-1) # [B, H, W, num_instances]
+        pred_masks = pred_masks.argmax(dim=-1) # [B, H, W]
+
+        return pred_rgb, pred_depth, pred_masks, gt_masks, loss
+    
+    def test_step(self, data, bg_color=None, perturb=False):  
+
+        rays_o = data['rays_o'] # [B, N, 3]
+        rays_d = data['rays_d'] # [B, N, 3]
+        B, H, W = rays_o.shape[0], data['H'], data['W']
+
+        if bg_color is not None:
+            bg_color = bg_color.to(self.device)
+
+        outputs = self.model.render(rays_o, rays_d, render_mask=True, staged=True, 
+                                    bg_color=bg_color, perturb=perturb, **vars(self.opt))
+
+        pred_rgb = outputs['image'].reshape(-1, H, W, 3)
+        pred_depth = outputs['depth'].reshape(-1, H, W)
+        pred_masks = outputs['instance_mask_logits'].reshape(B, H, W, -1)
+
+        pred_masks = torch.softmax(pred_masks, dim=-1) # [B, H, W, num_instances]
+        pred_masks = pred_masks.argmax(dim=-1) # [B, H, W]
+
+        return pred_rgb, pred_depth, pred_masks
+
+    ### ------------------------------
+
+    def test(self, loader, save_path=None, name=None, write_video=True):
+
+        if save_path is None:
+            save_path = os.path.join(self.workspace, 'results')
+
+        if name is None:
+            name = f'{self.name}_ep{self.epoch:04d}'
+
+        os.makedirs(save_path, exist_ok=True)
+        
+        self.log(f"==> Start Test, save results to {save_path}")
+
+        pbar = tqdm.tqdm(total=len(loader) * loader.batch_size, bar_format='{percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+        self.model.eval()
+
+        if write_video:
+            all_preds = []
+            all_preds_depth = []
+            all_preds_mask = []
+
+        with torch.no_grad():
+
+            for i, data in enumerate(loader):
+                
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, preds_depth, pred_mask = self.test_step(data)
+
+                if self.opt.color_space == 'linear':
+                    preds = linear_to_srgb(preds)
+
+                pred = preds[0].detach().cpu().numpy()
+                pred = (pred * 255).astype(np.uint8)
+
+                pred_depth = preds_depth[0].detach().cpu().numpy()
+                pred_depth = (pred_depth * 255).astype(np.uint8)
+
+                pred_mask = pred_mask[0].detach().cpu().numpy().astype(np.uint8)
+
+                if write_video:
+                    all_preds.append(pred)
+                    all_preds_depth.append(pred_depth)
+                    all_preds_mask.append(self.color_map[pred_mask.flatten()].reshape(pred_mask.shape + (3,)))
+                else:
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_depth.png'), pred_depth)
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask.png'), pred_mask)
+
+                    mask_rgb = self.color_map[pred_mask.flatten()].reshape(pred_mask.shape + (3,))
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask_rgb.png'), cv2.cvtColor(mask_rgb, cv2.COLOR_RGB2BGR))
+
+                pbar.update(loader.batch_size)
+        
+        if write_video:
+            all_preds = np.stack(all_preds, axis=0)
+            all_preds_depth = np.stack(all_preds_depth, axis=0)
+            all_preds_mask = np.stack(all_preds_mask, axis=0)
+            imageio.mimwrite(os.path.join(save_path, f'{name}_rgb.mp4'), all_preds, fps=25, quality=8, macro_block_size=1)
+            imageio.mimwrite(os.path.join(save_path, f'{name}_depth.mp4'), all_preds_depth, fps=25, quality=8, macro_block_size=1)
+            imageio.mimwrite(os.path.join(save_path, f'{name}_mask.mp4'), all_preds_mask, fps=25, quality=8, macro_block_size=1)
+
+
+        self.log(f"==> Finished Test.")
+
+    # [GUI] test on a single image
+    def test_gui(self, pose, intrinsics, W, H, bg_color=None, spp=1, downscale=1):
+        
+        # render resolution (may need downscale to for better frame rate)
+        rH = int(H * downscale)
+        rW = int(W * downscale)
+        intrinsics = intrinsics * downscale
+
+        pose = torch.from_numpy(pose).unsqueeze(0).to(self.device)
+
+        rays = get_rays(pose, intrinsics, rH, rW, -1)
+
+        data = {
+            'rays_o': rays['rays_o'],
+            'rays_d': rays['rays_d'],
+            'H': rH,
+            'W': rW,
+        }
+        
+        self.model.eval()
+
+        if self.ema is not None:
+            self.ema.store()
+            self.ema.copy_to()
+
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(enabled=self.fp16):
+                # here spp is used as perturb random seed! (but not perturb the first sample)
+                preds, preds_depth, pred_mask = self.test_step(data, bg_color=bg_color, perturb=False if spp == 1 else spp)
+
+        if self.ema is not None:
+            self.ema.restore()
+
+        # interpolation to the original resolution
+        if downscale != 1:
+            # TODO: have to permute twice with torch...
+            preds = F.interpolate(preds.permute(0, 3, 1, 2), size=(H, W), mode='nearest').permute(0, 2, 3, 1).contiguous()
+            preds_depth = F.interpolate(preds_depth.unsqueeze(1), size=(H, W), mode='nearest').squeeze(1)
+            pred_mask = F.interpolate(pred_mask.unsqueeze(1), size=(H, W), mode='nearest').squeeze(1)
+
+        if self.opt.color_space == 'linear':
+            preds = linear_to_srgb(preds)
+
+        pred = preds[0].detach().cpu().numpy()
+        pred_depth = preds_depth[0].detach().cpu().numpy()
+        pred_mask = pred_mask[0].detach().cpu().numpy().astype(np.uint8)
+
+        outputs = {
+            'image': pred,
+            'depth': pred_depth,
+            'mask': pred_mask,
+        }
+
+        return outputs
+
+    def evaluate_one_epoch(self, loader, name=None):
+        self.log(f"++> Evaluate at epoch {self.epoch} ...")
+
+        if name is None:
+            name = f'{self.name}_ep{self.epoch:04d}'
+
+        total_loss = 0
+        if self.local_rank == 0:
+            for metric in self.metrics:
+                metric.clear()
+
+        self.model.eval()
+
+        if self.ema is not None:
+            self.ema.store()
+            self.ema.copy_to()
+
+        if self.local_rank == 0:
+            pbar = tqdm.tqdm(total=len(loader) * loader.batch_size, bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+
+        with torch.no_grad():
+            self.local_step = 0
+
+            for data in loader:    
+                self.local_step += 1
+
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, preds_depth, preds_mask, gt_mask, loss = self.eval_step(data)
+
+                # all_gather/reduce the statistics (NCCL only support all_*)
+                if self.world_size > 1:
+                    dist.all_reduce(loss, op=dist.ReduceOp.SUM)
+                    loss = loss / self.world_size
+                    
+                    preds_list = [torch.zeros_like(preds).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    dist.all_gather(preds_list, preds)
+                    preds = torch.cat(preds_list, dim=0)
+
+                    preds_depth_list = [torch.zeros_like(preds_depth).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    dist.all_gather(preds_depth_list, preds_depth)
+                    preds_depth = torch.cat(preds_depth_list, dim=0)
+
+                    preds_mask_list = [torch.zeros_like(preds_mask).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    dist.all_gather(preds_mask_list, preds_mask)
+                    preds_mask = torch.cat(preds_mask_list, dim=0)
+
+                    gt_mask_list = [torch.zeros_like(gt_mask).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    dist.all_gather(gt_mask_list, gt_mask)
+                    gt_mask = torch.cat(gt_mask_list, dim=0)
+                
+                loss_val = loss.item()
+                total_loss += loss_val
+
+                # only rank = 0 will perform evaluation.
+                if self.local_rank == 0:
+
+                    for metric in self.metrics:
+                        metric.update(preds_mask, gt_mask)
+
+                    # save image
+                    save_path = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_rgb.png')
+                    save_path_depth = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_depth.png')
+                    save_path_mask = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_mask.png')
+
+                    #self.log(f"==> Saving validation image to {save_path}")
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+                    if self.opt.color_space == 'linear':
+                        preds = linear_to_srgb(preds)
+
+                    pred = preds[0].detach().cpu().numpy()
+                    pred = (pred * 255).astype(np.uint8)
+
+                    pred_depth = preds_depth[0].detach().cpu().numpy()
+                    pred_depth = (pred_depth * 255).astype(np.uint8)
+
+                    pred_mask = preds_mask[0].detach().cpu().numpy().astype(np.uint8)
+                    
+                    cv2.imwrite(save_path, cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(save_path_depth, pred_depth)
+                    cv2.imwrite(save_path_mask, pred_mask)
+
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
+                    pbar.update(loader.batch_size)
+
+
+        average_loss = total_loss / self.local_step
+        self.stats["valid_loss"].append(average_loss)
+
+        if self.local_rank == 0:
+            pbar.close()
+            if not self.use_loss_as_metric and len(self.metrics) > 0:
+                result = self.metrics[0].measure()
+                self.stats["results"].append(result if self.best_mode == 'min' else - result) # if max mode, use -result
+            else:
+                self.stats["results"].append(average_loss) # if no metric, choose best by min loss
+
+            for metric in self.metrics:
+                self.log(metric.report(), style="blue")
+                if self.use_tensorboardX:
+                    metric.write(self.writer, self.epoch, prefix="evaluate")
+                metric.clear()
+
+        if self.ema is not None:
+            self.ema.restore()
+
+        self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+      
