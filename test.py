@@ -7,4 +7,4 @@ with np.load(f_path) as data:
     feature = feature.reshape(res.tolist())
 t = (300, 1000)
 # res = cv2.resize(feature.transpose(1,2,0), dsize=t, interpolation=cv2.INTER_CUBIC)
-print(feature.max())
+print(feature[:, 0,0].std() )

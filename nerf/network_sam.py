@@ -20,9 +20,9 @@ class NeRFNetwork(NeRFSAMRenderer):
                  num_layers_bg=2,
                  hidden_dim_bg=64,
                  num_layers_sam=3,
-                 hidden_dim_sam=128,
+                 hidden_dim_sam=256,
                  num_layers_sam_dir=3,
-                 hidden_dim_sam_dir=128,
+                 hidden_dim_sam_dir=256,
                  feature_dim=256,       # including background
                  bound=1,
                  view_dependent=True,
@@ -77,7 +77,7 @@ class NeRFNetwork(NeRFSAMRenderer):
         # sam feature network
         self.num_layers_sam = num_layers_sam
         self.hidden_dim_sam = hidden_dim_sam
-        self.encoder_sam, self.in_dim_sam = get_encoder(encoding, num_levels=16, level_dim=8, 
+        self.encoder_sam, self.in_dim_sam = get_encoder(encoding, num_levels=32, level_dim=8, 
                                                         log2_hashmap_size=21,
                                                         desired_resolution=2048 * bound)
         
@@ -181,16 +181,19 @@ class NeRFNetwork(NeRFSAMRenderer):
             s_sam = self.sam_net[l](s_sam)
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
-        sam_f = torch.sigmoid(s_sam)
-        
+        sam_f = s_sam
+                
         if self.view_dependent:
+            s_sam = F.relu(s_sam, inplace=True)         
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
-            for l in range(self.num_layers_color):
-                h_sam = self.color_net[l](h_sam)
-                if l != self.num_layers_color - 1:
-                    h = F.relu(h, inplace=True)
-            sam_f = torch.sigmoid(h_sam)
+
+            for l in range(self.num_layers_sam_dir):
+                h_sam = self.sam_dir_net[l](h_sam)
+                if l != self.num_layers_sam_dir - 1:
+                    h_sam = F.relu(h_sam, inplace=True)
+            sam_f = h_sam
+            
         return sigma, color, sam_f
 
     def density(self, x):
@@ -275,9 +278,10 @@ class NeRFNetwork(NeRFSAMRenderer):
             s_sam = self.sam_net[l](s_sam)
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
-        output = torch.sigmoid(s_sam)
+        output = s_sam
                 
         if self.view_dependent:
+            s_sam = F.relu(s_sam, inplace=True)         
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
 
@@ -285,7 +289,7 @@ class NeRFNetwork(NeRFSAMRenderer):
                 h_sam = self.sam_dir_net[l](h_sam)
                 if l != self.num_layers_sam_dir - 1:
                     h_sam = F.relu(h_sam, inplace=True)
-            output = torch.sigmoid(h_sam)
+            output = h_sam
             
         if mask is not None:
             sam_f[mask] = output.to(sam_f.dtype) # fp16 --> fp32
