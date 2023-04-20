@@ -689,7 +689,6 @@ class NeRFSAMDataset:
 
                 if not os.path.exists(f_path):
                     continue
-                
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
@@ -783,9 +782,11 @@ class NeRFSAMDataset:
         }
 
         if self.features is not None:
-            features = self.features[index].to(self.device) # [B,H, W, C]
+            features = self.features[index].to(self.device) # [B, H, W, C]
+            print(features.view(B, -1, self.feature_dim).shape)
+            print(rays['inds'].shape)
             if self.training:
-                features = torch.gather(features.view(B, -1, self.feature_dim), 1, rays['inds']) # [B, N, C]
+                features = torch.gather(features.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
             results['features'] = features
 
         if self.mask3d is not None:
