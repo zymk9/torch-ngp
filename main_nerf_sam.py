@@ -143,7 +143,7 @@ if __name__ == '__main__':
         if not opt.train_sam:
             metrics.append(LPIPSMeter(device=device))
         else:
-            metrics.append(MeanIoUMeter())
+            metrics.append(MSEMeter())
 
         test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2, feature_dim=opt.feature_dim).dataloader()
         feature_dim = test_loader._data.feature_dim if opt.train_sam else None
@@ -157,8 +157,7 @@ if __name__ == '__main__':
             density_thresh=opt.density_thresh,
             bg_radius=opt.bg_radius,
         )
-        print(model)
-
+  
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, 
                            fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)                         
 
@@ -196,7 +195,7 @@ if __name__ == '__main__':
         if not opt.train_sam:
             metrics.append(LPIPSMeter(device=device))
         else:
-            metrics.append(MeanIoUMeter())
+            metrics.append(MSEMeter())
 
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 

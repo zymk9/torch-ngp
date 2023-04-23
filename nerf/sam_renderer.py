@@ -210,7 +210,7 @@ class NeRFSAMRenderer(NeRFRenderer):
 
         # calculate sam feature
         if render_feature:
-            sam_feature = torch.sum(weights.unsqueeze(-1) * sam_feature, dim=-2) # [N, num_instances]
+            sam_feature = torch.sum(weights.unsqueeze(-1) * sam_feature, dim=-2) # [N, feature_dim]
             sam_feature = sam_feature.view(*prefix, self.feature_dim)
         else:
             sam_feature = None
@@ -576,7 +576,7 @@ class NeRFSAMRenderer(NeRFRenderer):
                     if render_feature:
                         sam_feature[b:b+1, head:tail] = results_['sam_feature']
                     head += max_ray_batch
-            
+
             results = {}
             results['depth'] = depth
             results['image'] = image

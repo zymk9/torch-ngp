@@ -251,7 +251,59 @@ class MeanIoUMeter:
     def name(self):
         return 'mIoU'
 
+def pt(obj):
+    
+    if type(obj) is list or type(obj) is tuple:
+        shape_list = []
+        for i in obj:
+            shape_list.append(pt(i))
+        return shape_list
+    else:
+        return obj.shape
+        
+def print_shape(obj):
+    shape = pt(obj)
+    print(shape)
 
+
+class MSEMeter:
+    def __init__(self):
+        self.V = 0
+        self.N = 0
+
+    def clear(self):
+        self.V = 0
+        self.N = 0
+
+    def prepare_inputs(self, *inputs):
+        outputs = []
+        for i, inp in enumerate(inputs):
+            if torch.is_tensor(inp):
+                inp = inp.detach().cpu().numpy()
+            outputs.append(inp)
+
+        return outputs
+
+    def update(self, preds, truths):
+        preds, truths = self.prepare_inputs(preds, truths) # [B, N, C] or [B, H, W, C]
+        errors = np.mean(np.square(preds - truths))
+        
+        self.V += np.mean(errors)
+        self.N += 1
+
+    def measure(self):
+        return self.V / self.N
+
+    def write(self, writer, global_step, prefix=""):
+        writer.add_scalar(os.path.join(prefix, "MSE"), self.measure(), global_step)
+
+    def report(self):
+        return f'MSE = {self.measure():.6f}'
+    
+    def name(self):
+        return 'MSE'
+    
+    
 class PSNRMeter:
     def __init__(self):
         self.V = 0
@@ -518,7 +570,7 @@ class Trainer(object):
             wandb.config = deepcopy(opt)
 
     def __del__(self):
-        if self.log_ptr: 
+        if self.log_ptr is not None: 
             self.log_ptr.close()
 
 
@@ -718,7 +770,7 @@ class Trainer(object):
             if self.workspace is not None and self.local_rank == 0:
                 self.save_checkpoint(full=True, best=False)
 
-            if self.epoch % self.eval_interval == 0:
+            if self.epoch % self.eval_interval == 0 or self.epoch == 1:
                 self.evaluate_one_epoch(valid_loader)
                 self.save_checkpoint(full=False, best=True)
 
@@ -1719,30 +1771,30 @@ class SAMTrainer(Trainer):
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
 
-        gt_features = data['features'] # [B, N], N=H*W?
+        gt_feature = data['feature'] # [B, N], N=H*W?
 
-        B, N, _ = gt_features.shape
+        B, N, _ = gt_feature.shape
 
         bg_color = 1
 
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
                                     force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
         # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
-        pred_features = outputs['sam_feature'] # [B, N, feature_dim]
+        pred_feature = outputs['sam_feature'] # [B, N, feature_dim]
 
         # MSE
-        loss = self.criterion(pred_features, gt_features).mean(-1) # [B, N, feature_dim] --> [B, N]
+        loss = self.criterion(pred_feature, gt_feature).mean(-1) # [B, N, feature_dim] --> [B, N]
 
         # patch-based rendering
         if self.opt.patch_size > 1:
-            gt_features = gt_features.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
-            pred_features = pred_features.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
+            gt_feature = gt_feature.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
+            pred_feature = pred_feature.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
 
             # torch_vis_2d(gt_rgb[0])
             # torch_vis_2d(pred_rgb[0])
 
             # LPIPS loss [not useful...]
-            loss = loss + 1e-3 * self.criterion_lpips(pred_features, gt_features)
+            loss = loss + 1e-3 * self.criterion_lpips(pred_feature, gt_feature)
 
         # update error_map
         if self.error_map is not None:
@@ -1771,7 +1823,7 @@ class SAMTrainer(Trainer):
         loss = loss.mean()
 
         if self.opt.label_regularization_weight > 0:
-            loss = loss + self.label_regularization(outputs['depth'], pred_features) * self.opt.label_regularization_weight
+            loss = loss + self.label_regularization(outputs['depth'], pred_feature) * self.opt.label_regularization_weight
         
         
         # extra loss
@@ -1784,44 +1836,36 @@ class SAMTrainer(Trainer):
             mask3d_loss = self.mask3d_loss(data)
             loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
 
-        return pred_features, gt_features, loss
+        return pred_feature, gt_feature, loss
     
     def eval_step(self, data):
 
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
-        masks = data['masks'] # [B, H, W]
-        B, H, W = masks.shape
+        gt_feature = data['feature'] # [B, H, W]
+        B, H, W, _ = gt_feature.shape
 
         # eval with fixed background color
         bg_color = 1
-        
-        gt_masks = masks
         
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=True, 
                                     bg_color=bg_color, perturb=False, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(B, H, W, 3)
         pred_depth = outputs['depth'].reshape(B, H, W)
-        pred_masks = outputs['instance_mask_logits'].reshape(B, H, W, -1)
+        pred_feature = outputs['sam_feature'].reshape(B, H, W, -1)
 
-        pred_masks_flattened = pred_masks.view(-1, pred_masks.shape[-1]) # [B*H*W, num_instances]
-        gt_masks_flattened = gt_masks.view(-1) # [B*H*W]
-
-        labeled = gt_masks_flattened != -1  # only compute loss for labeled pixels
-        loss = self.criterion(pred_masks_flattened[labeled], gt_masks_flattened[labeled]).mean()
+        loss = self.criterion(pred_feature, gt_feature).mean()
 
         if self.opt.label_regularization_weight > 0:
-            loss = loss + self.label_regularization(outputs['depth'], pred_masks) * self.opt.label_regularization_weight
+            loss = loss + self.label_regularization(outputs['depth'], pred_feature) * self.opt.label_regularization_weight
 
         if self.opt.mask3d_loss_weight > 0:
             mask3d_loss = self.mask3d_loss(data)
             loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
 
-        pred_masks = torch.softmax(pred_masks, dim=-1) # [B, H, W, num_instances]
-        pred_masks = pred_masks.argmax(dim=-1) # [B, H, W]
 
-        return pred_rgb, pred_depth, pred_masks, gt_masks, loss
+        return pred_rgb, pred_depth, pred_feature, gt_feature, loss
     
     def test_step(self, data, bg_color=None, perturb=False):  
 
@@ -1837,12 +1881,9 @@ class SAMTrainer(Trainer):
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
-        pred_masks = outputs['instance_mask_logits'].reshape(B, H, W, -1)
+        pred_feature = outputs['sam_feature'].reshape(B, H, W, -1)
 
-        pred_masks = torch.softmax(pred_masks, dim=-1) # [B, H, W, num_instances]
-        pred_masks = pred_masks.argmax(dim=-1) # [B, H, W]
-
-        return pred_rgb, pred_depth, pred_masks
+        return pred_rgb, pred_depth, pred_feature
 
     ### ------------------------------
 
@@ -1864,14 +1905,11 @@ class SAMTrainer(Trainer):
         if write_video:
             all_preds = []
             all_preds_depth = []
-            all_preds_mask = []
 
         with torch.no_grad():
-
             for i, data in enumerate(loader):
-                
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    preds, preds_depth, pred_mask = self.test_step(data)
+                    preds, preds_depth, pred_feature = self.test_step(data)
 
                 if self.opt.color_space == 'linear':
                     preds = linear_to_srgb(preds)
@@ -1882,30 +1920,28 @@ class SAMTrainer(Trainer):
                 pred_depth = preds_depth[0].detach().cpu().numpy()
                 pred_depth = (pred_depth * 255).astype(np.uint8)
 
-                pred_mask = pred_mask[0].detach().cpu().numpy().astype(np.uint8)
+                pred_feature = pred_feature[0].detach().cpu().numpy()
 
                 if write_video:
                     all_preds.append(pred)
                     all_preds_depth.append(pred_depth)
-                    all_preds_mask.append(self.color_map[pred_mask.flatten()].reshape(pred_mask.shape + (3,)))
                 else:
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_depth.png'), pred_depth)
-                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask.png'), pred_mask)
+                    
+                    pred_feature = pred_feature.transpose(2,0,1)
+                    res = np.array(pred_feature.shape)
+                    pred_feature = pred_feature.reshape([res[0], -1])
+                    np.savez(os.path.join(save_path, f'{name}_{i:04d}_feature.npz'), res=res, embedding=pred_feature)
 
-                    mask_rgb = self.color_map[pred_mask.flatten()].reshape(pred_mask.shape + (3,))
-                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_mask_rgb.png'), cv2.cvtColor(mask_rgb, cv2.COLOR_RGB2BGR))
-
+                    
                 pbar.update(loader.batch_size)
         
         if write_video:
             all_preds = np.stack(all_preds, axis=0)
             all_preds_depth = np.stack(all_preds_depth, axis=0)
-            all_preds_mask = np.stack(all_preds_mask, axis=0)
             imageio.mimwrite(os.path.join(save_path, f'{name}_rgb.mp4'), all_preds, fps=25, quality=8, macro_block_size=1)
             imageio.mimwrite(os.path.join(save_path, f'{name}_depth.mp4'), all_preds_depth, fps=25, quality=8, macro_block_size=1)
-            imageio.mimwrite(os.path.join(save_path, f'{name}_mask.mp4'), all_preds_mask, fps=25, quality=8, macro_block_size=1)
-
 
         self.log(f"==> Finished Test.")
 
@@ -1937,7 +1973,7 @@ class SAMTrainer(Trainer):
         with torch.no_grad():
             with torch.cuda.amp.autocast(enabled=self.fp16):
                 # here spp is used as perturb random seed! (but not perturb the first sample)
-                preds, preds_depth, pred_mask = self.test_step(data, bg_color=bg_color, perturb=False if spp == 1 else spp)
+                preds, preds_depth, pred_feature = self.test_step(data, bg_color=bg_color, perturb=False if spp == 1 else spp)
 
         if self.ema is not None:
             self.ema.restore()
@@ -1947,19 +1983,19 @@ class SAMTrainer(Trainer):
             # TODO: have to permute twice with torch...
             preds = F.interpolate(preds.permute(0, 3, 1, 2), size=(H, W), mode='nearest').permute(0, 2, 3, 1).contiguous()
             preds_depth = F.interpolate(preds_depth.unsqueeze(1), size=(H, W), mode='nearest').squeeze(1)
-            pred_mask = F.interpolate(pred_mask.unsqueeze(1), size=(H, W), mode='nearest').squeeze(1)
+            pred_feature = F.interpolate(pred_feature.unsqueeze(1), size=(H, W), mode='nearest').squeeze(1)
 
         if self.opt.color_space == 'linear':
             preds = linear_to_srgb(preds)
 
         pred = preds[0].detach().cpu().numpy()
         pred_depth = preds_depth[0].detach().cpu().numpy()
-        pred_mask = pred_mask[0].detach().cpu().numpy().astype(np.uint8)
+        pred_feature = pred_feature[0].detach().cpu().numpy()
 
         outputs = {
             'image': pred,
             'depth': pred_depth,
-            'mask': pred_mask,
+            'feature': pred_feature,
         }
 
         return outputs
@@ -1991,7 +2027,7 @@ class SAMTrainer(Trainer):
                 self.local_step += 1
 
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    preds, preds_depth, preds_mask, gt_mask, loss = self.eval_step(data)
+                    preds, preds_depth, preds_feature, gt_feature, loss = self.eval_step(data)
 
                 # all_gather/reduce the statistics (NCCL only support all_*)
                 if self.world_size > 1:
@@ -2006,13 +2042,13 @@ class SAMTrainer(Trainer):
                     dist.all_gather(preds_depth_list, preds_depth)
                     preds_depth = torch.cat(preds_depth_list, dim=0)
 
-                    preds_mask_list = [torch.zeros_like(preds_mask).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
-                    dist.all_gather(preds_mask_list, preds_mask)
-                    preds_mask = torch.cat(preds_mask_list, dim=0)
+                    preds_feature_list = [torch.zeros_like(preds_feature).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    dist.all_gather(preds_feature_list, preds_feature)
+                    preds_feature = torch.cat(preds_feature_list, dim=0)
 
-                    gt_mask_list = [torch.zeros_like(gt_mask).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
-                    dist.all_gather(gt_mask_list, gt_mask)
-                    gt_mask = torch.cat(gt_mask_list, dim=0)
+                    gt_feature_list = [torch.zeros_like(gt_feature).to(self.device) for _ in range(self.world_size)] # [[B, ...], [B, ...], ...]
+                    dist.all_gather(gt_feature_list, gt_feature)
+                    gt_feature = torch.cat(gt_feature_list, dim=0)
                 
                 loss_val = loss.item()
                 total_loss += loss_val
@@ -2021,12 +2057,12 @@ class SAMTrainer(Trainer):
                 if self.local_rank == 0:
 
                     for metric in self.metrics:
-                        metric.update(preds_mask, gt_mask)
+                        metric.update(preds_feature, gt_feature)
 
                     # save image
                     save_path = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_rgb.png')
                     save_path_depth = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_depth.png')
-                    save_path_mask = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_mask.png')
+                    save_path_feature = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_feature.npz')
 
                     #self.log(f"==> Saving validation image to {save_path}")
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -2040,12 +2076,17 @@ class SAMTrainer(Trainer):
                     pred_depth = preds_depth[0].detach().cpu().numpy()
                     pred_depth = (pred_depth * 255).astype(np.uint8)
 
-                    pred_mask = preds_mask[0].detach().cpu().numpy().astype(np.uint8)
+                    pred_feature = preds_feature[0].detach().cpu().numpy()
                     
                     cv2.imwrite(save_path, cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
                     cv2.imwrite(save_path_depth, pred_depth)
-                    cv2.imwrite(save_path_mask, pred_mask)
 
+                    pred_feature = pred_feature.transpose(2,0,1)
+                    res = np.array(pred_feature.shape)
+                    pred_feature = pred_feature.reshape([res[0], -1])
+                    np.savez(save_path_feature, res=res, embedding=pred_feature)
+
+                    
                     pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
                     pbar.update(loader.batch_size)
 

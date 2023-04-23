@@ -612,7 +612,7 @@ class NeRFSAMDataset:
                 transform_val = json.load(f)
             transform['frames'].extend(transform_val['frames'])
         elif type == 'test_all':
-            with open(os.path.join(self.root_path, f'transforms_train_sam.json'), 'r') as f:
+            with open(os.path.join(self.root_path, f'transforms_test_sam.json'), 'r') as f:
                 transform = json.load(f)
         # only load one specified split
         else:
@@ -703,8 +703,8 @@ class NeRFSAMDataset:
 
                 # resize the features to fit the image size
                 if feature.shape[0] != self.H or feature.shape[1] != self.W:
-                    feature = cv2.resize(feature, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
-
+                    feature = self.preprocess_feature(feature)
+                    
                 self.poses.append(pose)
                 self.features.append(feature)
             
@@ -724,6 +724,7 @@ class NeRFSAMDataset:
 
 
         if self.preload:
+            print('load poses to GPU')
             self.poses = self.poses.to(self.device)
             if self.error_map is not None:
                 self.error_map = self.error_map.to(self.device)
@@ -746,7 +747,14 @@ class NeRFSAMDataset:
     
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
+    def preprocess_feature(self, feature):
+        f_h, f_w = feature.shape[1:]
+        max_size = max(self.W, self.H)
+        crop_h, crop_w = int(np.floor(f_h * self.H / max_size)), int(np.floor(f_w * self.W / max_size))
+        feature = feature[:crop_h, :crop_w, :]
 
+        return cv2.resize(feature, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+    
     def collate(self, index):
 
         B = len(index) # a list of length 1
@@ -782,14 +790,10 @@ class NeRFSAMDataset:
         }
 
         if self.features is not None:
-            features = self.features[index].to(self.device) # [B, H, W, C]
-            a = features.view(B, -1, self.feature_dim)[0,rays['inds'][0]]
-
-            
-
+            feature = self.features[index].to(self.device) # [B, H, W, C]
             if self.training:
-                features = torch.gather(features.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
-            results['features'] = features
+                feature = torch.gather(feature.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
+            results['feature'] = feature
 
         if self.mask3d is not None:
             results['mask3d_coords'] = self.mask3d_coords
