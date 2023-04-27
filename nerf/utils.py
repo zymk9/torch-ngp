@@ -5,6 +5,7 @@ import math
 import imageio
 import random
 import warnings
+import json
 import tensorboardX
 
 import numpy as np
@@ -1711,7 +1712,7 @@ class MaskTrainer(Trainer):
 
 
 class SAMTrainer(Trainer):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, feature_size=64, load_feature = True, predictor = None, **kwargs):
         super().__init__(*args, **kwargs)
 
         # TODO: overflow issue, currently just use the same color map as gt visualization
@@ -1720,7 +1721,11 @@ class SAMTrainer(Trainer):
         ], 255).astype(np.uint8)
 
         self.feature_dim = self.model.feature_dim
-
+        self.feature_size = feature_size
+        self.predictor = predictor
+        if predictor is not None:
+            self.predictor.to(self.device)
+        self.load_feature = load_feature
         # freeze rgb and density
         self.model.encoder.requires_grad_(False)
         self.model.sigma_net.requires_grad_(False)
@@ -1728,6 +1733,20 @@ class SAMTrainer(Trainer):
         self.model.color_net.requires_grad_(False)
 
     ### ------------------------------
+
+    def postprocess(self, features):
+        target_feature_size = self.feature_size
+        f_h, f_w = features.shape[1:]
+        max_length = max(f_h, f_w)
+        h,w = int(np.floor(target_feature_size * f_h / max_length)), int(np.floor(target_feature_size * f_w / max_length))
+        features = cv2.resize(features.transpose(1,2,0), (w,h), interpolation = cv2.INTER_LINEAR  )
+        features = features.transpose(2,0,1)
+        features = torch.from_numpy(features[None,...])
+        
+        padh = target_feature_size - h
+        padw = target_feature_size - w
+        return F.pad(features, (0, padw, 0, padh)).numpy()[0]
+
 
     def mask3d_loss(self, data):
         coords = data['mask3d_coords'] # [N, 3]
@@ -1770,8 +1789,14 @@ class SAMTrainer(Trainer):
 
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
-
-        gt_feature = data['feature'] # [B, N], N=H*W?
+        if self.load_feature:
+            gt_feature = data['feature'] # [B, N], N=H*W?
+        elif self.predictor is not None:
+            gt_im = data['image']
+            self.predictor.set_image(gt_im)
+            gt_feature = self.predictor.get_image_embedding()
+        else:
+            exit()
 
         B, N, _ = gt_feature.shape
 
@@ -1780,6 +1805,7 @@ class SAMTrainer(Trainer):
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
                                     force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
         # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
+        
         pred_feature = outputs['sam_feature'] # [B, N, feature_dim]
 
         # MSE
@@ -1881,9 +1907,10 @@ class SAMTrainer(Trainer):
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
+        pred_t_depth = outputs['t_depth'].reshape(-1, H, W)
         pred_feature = outputs['sam_feature'].reshape(B, H, W, -1)
 
-        return pred_rgb, pred_depth, pred_feature
+        return pred_rgb, pred_depth, pred_t_depth, pred_feature
 
     ### ------------------------------
 
@@ -1905,12 +1932,14 @@ class SAMTrainer(Trainer):
         if write_video:
             all_preds = []
             all_preds_depth = []
+            all_preds_t_depth = []
+            all_preds_feature = []
+            all_poses = []
 
         with torch.no_grad():
             for i, data in enumerate(loader):
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    preds, preds_depth, pred_feature = self.test_step(data)
-
+                    preds, preds_depth, pred_t_depth, pred_feature = self.test_step(data)
                 if self.opt.color_space == 'linear':
                     preds = linear_to_srgb(preds)
 
@@ -1920,29 +1949,61 @@ class SAMTrainer(Trainer):
                 pred_depth = preds_depth[0].detach().cpu().numpy()
                 pred_depth = (pred_depth * 255).astype(np.uint8)
 
+                pred_t_depth = pred_t_depth[0].detach().cpu().numpy()
+                
                 pred_feature = pred_feature[0].detach().cpu().numpy()
 
                 if write_video:
                     all_preds.append(pred)
                     all_preds_depth.append(pred_depth)
+                    all_preds_t_depth.append(pred_t_depth)
+                    all_preds_feature.append(pred_feature)
+                    all_poses.append(data['poses'][0].cpu().numpy().tolist())
+                    
                 else:
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
-                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_depth.png'), pred_depth)
+                    
+                    depth_shape = pred_t_depth.shape
+                    pred_t_depth = pred_t_depth.reshape(-1).astype(np.float32)
+                    np.savez(os.path.join(save_path, f'{name}_{i:04d}_depth.npz'), size=depth_shape, depth=pred_t_depth)
                     
                     pred_feature = pred_feature.transpose(2,0,1)
+                    pred_feature = self.postprocess(pred_feature)
                     res = np.array(pred_feature.shape)
-                    pred_feature = pred_feature.reshape([res[0], -1])
+                    pred_feature = pred_feature.reshape(-1).astype(np.float32)
                     np.savez(os.path.join(save_path, f'{name}_{i:04d}_feature.npz'), res=res, embedding=pred_feature)
 
                     
                 pbar.update(loader.batch_size)
         
         if write_video:
+            os.makedirs(os.path.join(save_path, 'frames'), exist_ok=True)
+            for i, (r,d,f) in tqdm.tqdm(enumerate(zip(all_preds, all_preds_t_depth, all_preds_feature))):
+                f = f.transpose(2,0,1)
+                f = self.postprocess(f)
+                res = np.array(f.shape)
+                f = f.reshape(-1).astype(np.float32)
+                np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_feature.npz'), res=res, embedding=f)
+                cv2.imwrite(os.path.join(save_path, 'frames', f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(r, cv2.COLOR_RGB2BGR))
+                depth_shape = d.shape
+                print(depth_shape)
+                d = d.reshape(-1).astype(np.float32)
+                np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_depth.npz'), size=depth_shape, depth=d)
+                    
+            all_poses = {'poses': all_poses} 
+            all_poses = json.dumps(all_poses, indent=4)
+ 
+            # Writing to sample.json
+            with open(os.path.join(save_path, 'poses.json'), "w") as file:
+                file.write(all_poses)      
+                        
             all_preds = np.stack(all_preds, axis=0)
             all_preds_depth = np.stack(all_preds_depth, axis=0)
             imageio.mimwrite(os.path.join(save_path, f'{name}_rgb.mp4'), all_preds, fps=25, quality=8, macro_block_size=1)
             imageio.mimwrite(os.path.join(save_path, f'{name}_depth.mp4'), all_preds_depth, fps=25, quality=8, macro_block_size=1)
 
+                
+                
         self.log(f"==> Finished Test.")
 
     # [GUI] test on a single image

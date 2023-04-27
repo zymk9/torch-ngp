@@ -339,7 +339,7 @@ class NeRFDataset:
 
 
 class NeRFMaskDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test_per_pose=10, n_test_poses=10):
+    def __init__(self, opt, device, type='train', downscale=1, n_test_per_pose=10, n_test_poses=2):
         super().__init__()
         
         self.opt = opt
@@ -583,7 +583,8 @@ class NeRFMaskDataset:
 
 
 class NeRFSAMDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test_per_pose=10, n_test_poses=10, feature_dim=256):
+    def __init__(self, opt, device, type='train', downscale=1, n_test_per_pose=10, n_test_poses=2, feature_dim=256,
+                 feature_size=64, dataset_name='nerf'):
         super().__init__()
         
         self.opt = opt
@@ -604,18 +605,27 @@ class NeRFSAMDataset:
         self.rand_pose = opt.rand_pose
         self.mask3d = opt.mask3d if self.training or self.type == 'val' else None
         self.feature_dim = feature_dim
+        self.feature_size = feature_size
+        self.dataset_name = dataset_name
+
 
         if type == 'trainval' or type == 'test': # in test mode, interpolate new frames
+            if dataset_name == '3dfront':
+                self.root_path = os.path.join(self.root_path, 'train')
             with open(os.path.join(self.root_path, f'transforms_train_sam.json'), 'r') as f:
                 transform = json.load(f)
-            with open(os.path.join(self.root_path, f'transforms_val_sam.json'), 'r') as f:
-                transform_val = json.load(f)
-            transform['frames'].extend(transform_val['frames'])
+            # with open(os.path.join(self.root_path, f'transforms_val_sam.json'), 'r') as f:
+            #     transform_val = json.load(f)
+            # transform['frames'].extend(transform_val['frames'])
         elif type == 'test_all':
-            with open(os.path.join(self.root_path, f'transforms_test_sam.json'), 'r') as f:
+            if dataset_name == '3dfront':
+                self.root_path = os.path.join(self.root_path, 'val')
+            with open(os.path.join(self.root_path, f'transforms_val_sam.json'), 'r') as f:
                 transform = json.load(f)
         # only load one specified split
         else:
+            if dataset_name == '3dfront':
+                self.root_path = os.path.join(self.root_path, self.type)
             with open(os.path.join(self.root_path, f'transforms_{type}_sam.json'), 'r') as f:
                 transform = json.load(f)
 
@@ -659,16 +669,20 @@ class NeRFSAMDataset:
         
         # read images
         frames = transform["frames"]
+        if self.type == 'val':
+            frames = frames[10:]
+        # frames = frames[:10]
         
         # for colmap, manually interpolate a test set.
         if type == 'test':
             # choose two random poses, and interpolate between.
             f = np.random.choice(frames, n_test_poses, replace=False)
+
             poses = [nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) for f0 in f]
 
             self.features = None
             self.poses = []
-
+ 
             for k in range(len(poses) - 1):
                 pose0 = poses[k]
                 pose1 = poses[k + 1]
@@ -687,34 +701,41 @@ class NeRFSAMDataset:
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
 
-                if not os.path.exists(f_path):
+                if not os.path.exists(f_path) :
                     continue
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
-
+                self.poses.append(pose)
+                if self.type == 'test_all':
+                    continue
                 with np.load(f_path) as data:
                     res = data['res']
                     feature = data['embedding']
-                    feature = feature.reshape(res.tolist())
+                    feature = feature.reshape(res.tolist()).astype(np.float32)
                     feature = feature.transpose(1, 2, 0)
 
                 assert feature.shape[-1] == self.feature_dim , \
                     f'feature dimension does not match.'
-
+                assert feature.shape[0] == self.feature_size and feature.shape[1] == self.feature_size, \
+                    f'feature size does not match.'
                 # resize the features to fit the image size
                 if feature.shape[0] != self.H or feature.shape[1] != self.W:
                     feature = self.preprocess_feature(feature)
-                    
-                self.poses.append(pose)
-                self.features.append(feature)
-            
+                
+                self.features.append(torch.from_numpy(feature))
+
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
-        if self.features is not None:
-            self.features = torch.from_numpy(np.stack(self.features, axis=0)) # [N, H, W, C]
+        if self.type == 'test_all':
+            self.features = None
+        # if self.features is not None:
+        #     print('stack.')
+        #     self.features = np.stack(self.features, axis=0)
+        #     print('To torch.')
+        #     self.features = torch.from_numpy(self.features) # [N, H, W, C]
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
-        #print(f'[INFO] dataset camera poses: radius = {self.radius:.4f}, bound = {self.bound}')
+        # print(f'[INFO] dataset camera poses: radius = {self.radius:.4f}, bound = {self.bound}')
 
         # initialize error_map
         if self.training and self.opt.error_map:
@@ -774,11 +795,13 @@ class NeRFSAMDataset:
                 'W': rW,
                 'rays_o': rays['rays_o'],
                 'rays_d': rays['rays_d'],    
+                'poses': poses
             }
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
+        
         
         rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, self.opt.patch_size)
 
@@ -787,6 +810,7 @@ class NeRFSAMDataset:
             'W': self.W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
+            'poses': poses
         }
 
         if self.features is not None:

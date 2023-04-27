@@ -9,6 +9,8 @@ from functools import partial
 from loss import huber_loss
 
 import wandb
+from segment_anything import build_sam, SamPredictor 
+
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -75,12 +77,10 @@ if __name__ == '__main__':
 
 
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
-    parser.add_argument('--dataset_name', type=str, default='default', choices=['3dfront', 'scannet', 'hypersim'], 
+    parser.add_argument('--dataset_name', type=str, default='nerf', choices=['nerf', '3dfront', 'scannet', 'hypersim'], 
                         help='A dataset name for wandb logging')
 
     opt = parser.parse_args()
-
-    torch.cuda.set_device(opt.gpu)
 
     if opt.O:
         opt.fp16 = True
@@ -145,7 +145,7 @@ if __name__ == '__main__':
         else:
             metrics.append(MSEMeter())
 
-        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2, feature_dim=opt.feature_dim).dataloader()
+        test_loader = Dataset_(opt, device=device, type='test', n_test_per_pose=10, feature_dim=opt.feature_dim, dataset_name=opt.dataset_name).dataloader()
         feature_dim = test_loader._data.feature_dim if opt.train_sam else None
 
         model = NeRFNetwork(
@@ -157,6 +157,8 @@ if __name__ == '__main__':
             density_thresh=opt.density_thresh,
             bg_radius=opt.bg_radius,
         )
+        
+        
   
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, 
                            fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)                         
@@ -169,14 +171,14 @@ if __name__ == '__main__':
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
     
-            trainer.test(test_loader, write_video=False) # test and save video
+            trainer.test(test_loader, write_video=True) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)
     
     else:
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
-        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim).dataloader()
+        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim, dataset_name=opt.dataset_name).dataloader()
 
         model = NeRFNetwork(
             encoding="hashgrid",
@@ -188,6 +190,7 @@ if __name__ == '__main__':
             bg_radius=opt.bg_radius,
         )
 
+        predictor = SamPredictor(build_sam(checkpoint=opt.sam_checkpoint))
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
@@ -207,13 +210,13 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            valid_loader = Dataset_(opt, device=device, type='val', downscale=1).dataloader()
+            valid_loader = Dataset_(opt, device=device, type='val', downscale=1, dataset_name=opt.dataset_name).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
 
             # also test
-            test_loader = Dataset_(opt, device=device, type='test').dataloader()
+            test_loader = Dataset_(opt, device=device, type='test', dataset_name=opt.dataset_name).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.

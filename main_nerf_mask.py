@@ -146,7 +146,7 @@ if __name__ == '__main__':
         else:
             metrics.append(MeanIoUMeter())
 
-        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2).dataloader()
+        test_loader = Dataset_(opt, device=device, type='test', n_test_per_pose=2).dataloader()
         num_instances = test_loader._data.num_instances if opt.train_mask else None
 
         model = NeRFNetwork(

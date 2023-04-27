@@ -192,9 +192,12 @@ class NeRFSAMRenderer(NeRFRenderer):
         weights_sum = weights.sum(dim=-1) # [N]
         
         # calculate depth 
+        # print(fars )
+        # print(nears)
+        # exit()
         ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1)
         depth = torch.sum(weights * ori_z_vals, dim=-1)
-
+        t_depth = torch.sum(weights * z_vals, dim=-1)
         # calculate color
         image = torch.sum(weights.unsqueeze(-1) * rgbs, dim=-2) # [N, 3], in [0, 1]
 
@@ -217,6 +220,7 @@ class NeRFSAMRenderer(NeRFRenderer):
 
         image = image.view(*prefix, 3)
         depth = depth.view(*prefix)
+        t_depth = t_depth.view(*prefix)
 
         # tmp: reg loss in mip-nerf 360
         # z_vals_shifted = torch.cat([z_vals[..., 1:], sample_dist * torch.ones_like(z_vals[..., :1])], dim=-1)
@@ -224,6 +228,7 @@ class NeRFSAMRenderer(NeRFRenderer):
 
         return {
             'depth': depth,
+            't_depth': t_depth,
             'image': image,
             'sam_feature': sam_feature,
             'weights_sum': weights_sum,
@@ -563,6 +568,7 @@ class NeRFSAMRenderer(NeRFRenderer):
         # never stage when cuda_ray
         if staged and not self.cuda_ray:
             depth = torch.empty((B, N), device=device)
+            t_depth = torch.empty((B, N), device=device)
             image = torch.empty((B, N, 3), device=device)
             sam_feature = torch.empty((B, N, self.feature_dim), device=device) if render_feature else None
 
@@ -572,6 +578,7 @@ class NeRFSAMRenderer(NeRFRenderer):
                     tail = min(head + max_ray_batch, N)
                     results_ = _run(rays_o[b:b+1, head:tail], rays_d[b:b+1, head:tail], render_feature, **kwargs)
                     depth[b:b+1, head:tail] = results_['depth']
+                    t_depth[b:b+1, head:tail] = results_['t_depth']
                     image[b:b+1, head:tail] = results_['image']
                     if render_feature:
                         sam_feature[b:b+1, head:tail] = results_['sam_feature']
@@ -579,6 +586,7 @@ class NeRFSAMRenderer(NeRFRenderer):
 
             results = {}
             results['depth'] = depth
+            results['t_depth'] = t_depth
             results['image'] = image
             results['sam_feature'] = sam_feature
 
