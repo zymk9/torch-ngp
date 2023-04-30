@@ -165,8 +165,8 @@ class NeRFNetwork(NeRFSAMRenderer):
         geo_feat = h[..., 1:]
 
         # color
-        d = self.encoder_dir(d)
-        h = torch.cat([d, geo_feat], dim=-1)
+        d_color = self.encoder_dir(d)
+        h = torch.cat([d_color, geo_feat], dim=-1)
         for l in range(self.num_layers_color):
             h = self.color_net[l](h)
             if l != self.num_layers_color - 1:

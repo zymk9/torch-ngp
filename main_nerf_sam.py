@@ -1,14 +1,12 @@
 import torch
 import argparse
 
-from nerf.provider import NeRFSAMDataset, NeRFDataset
+from nerf.provider import NeRFDataset
+from nerf.sam_provider import NeRFSAMDataset
 # from nerf.gui import NeRFGUI
 from nerf.utils import *
+from nerf.sam_trainer import SAMTrainer
 
-from functools import partial
-from loss import huber_loss
-
-import wandb
 from segment_anything import build_sam, SamPredictor 
 
 
@@ -69,16 +67,20 @@ if __name__ == '__main__':
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
 
     ### mask training options
-    parser.add_argument('--train_sam', action='store_true', help="train mask, use only after rgbsigma is converged")
+    parser.add_argument('--train_sam', action='store_true', help="train sam, use only after rgbsigma is converged")
     parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
     parser.add_argument('--mask3d_loss_weight', type=float, default=1.0, help="3d mask loss weight")
     parser.add_argument('--label_regularization_weight', type=float, default=1.0, help="label regularization weight")
     parser.add_argument('--feature_dim', type=int, default=256, help="dimension of features")
-
-
+    parser.add_argument('--load_feature', action='store_true', help="load the feature from some local directory")
+    parser.add_argument('--augmentation', type=float, default=1.,  help="Augment training data using NeRF output if it is larger than 0.")    
+    parser.add_argument('--sam_checkpoint', type=str, default=None, help="dimension of features")
+    parser.add_argument('--online', action='store_true', help="Online mode. Do not load features or images in advance")
+    
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
     parser.add_argument('--dataset_name', type=str, default='nerf', choices=['nerf', '3dfront', 'scannet', 'hypersim'], 
                         help='A dataset name for wandb logging')
+    
 
     opt = parser.parse_args()
 
@@ -190,7 +192,7 @@ if __name__ == '__main__':
             bg_radius=opt.bg_radius,
         )
 
-        predictor = SamPredictor(build_sam(checkpoint=opt.sam_checkpoint))
+        predictor = SamPredictor(build_sam(checkpoint=opt.sam_checkpoint).eval())
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
@@ -203,7 +205,8 @@ if __name__ == '__main__':
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
                            scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, 
-                           eval_interval=10, load_model_only=opt.load_model_only,)
+                           eval_interval=10, load_model_only=opt.load_model_only, load_feature = opt.load_feature,
+                           predictor=predictor)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)
