@@ -94,9 +94,7 @@ class SAMTrainer(Trainer):
         assert 'feature' in data or self.predictor is not None , \
             "Need features for training"
 
-
         B, N, _ = rays_o.shape
-
         bg_color = 1
 
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
@@ -117,12 +115,12 @@ class SAMTrainer(Trainer):
                     input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
                     
                 self.predictor.set_image(input_im)
-                gt_feature = self.predictor.get_image_embedding()
+                gt_feature = self.predictor.get_image_embedding().detach()
                 
                 if gt_feature.shape[0] != data['H'] or gt_feature.shape[1] != data['W']:
                     gt_feature = preprocess_feature(gt_feature, data['H'], data['W'])
                 gt_feature = gt_feature.permute(0,2,3,1)
-
+            gt_feature = gt_feature.to(self.device)
         # MSE
         loss = self.criterion(pred_feature, gt_feature).mean(-1) # [B, N, feature_dim] --> [B, N]
 
@@ -131,10 +129,6 @@ class SAMTrainer(Trainer):
             gt_feature = gt_feature.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
             pred_feature = pred_feature.view(-1, self.opt.patch_size, self.opt.patch_size, self.feature_dim).permute(0, 3, 1, 2).contiguous()
 
-            # torch_vis_2d(gt_rgb[0])
-            # torch_vis_2d(pred_rgb[0])
-
-            # LPIPS loss [not useful...]
             loss = loss + 1e-3 * self.criterion_lpips(pred_feature, gt_feature)
 
         # update error_map

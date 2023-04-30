@@ -139,7 +139,7 @@ class NeRFSAMDataset:
                     self.features = []
                 else:
                     self.images = []
-            for f in tqdm.tqdm(frames[:2], desc=f'Loading {type} data'):
+            for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
 
                 if not os.path.exists(f_path) :
@@ -243,7 +243,6 @@ class NeRFSAMDataset:
         if self.opt.train_sam:
             scale = max(self.H, self.W) / 64
 
-        
         if index[0] >= len(self.poses):
             perm = torch.randperm(self.poses.size(0))
             idx = perm[:B+1]
@@ -340,7 +339,7 @@ class NeRFSAMDataset:
         size = self.num_data
         if self.training and self.augmentation > 0:
             size += round(size * self.augmentation) # index >= size means we use random pose.
-        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, shuffle=self.training, num_workers=0)
+        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate,  num_workers=0)
         loader._data = self # an ugly fix... we need to access error_map & poses in trainer.
         loader.has_gt = self.features is not None
         return loader

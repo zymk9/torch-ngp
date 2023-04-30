@@ -31,7 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
     parser.add_argument('--num_steps', type=int, default=512, help="num steps sampled per ray (only valid when NOT using --cuda_ray)")
     parser.add_argument('--upsample_steps', type=int, default=0, help="num steps up-sampled per ray (only valid when NOT using --cuda_ray)")
-    parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
+    parser.add_argument('--update_extra_interval', type=int, default=2, help="iter interval to update extra status (only valid when using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
     parser.add_argument('--patch_size', type=int, default=1, help="[experimental] render patches in training, so as to apply LPIPS loss. 1 means disabled, use [64, 32, 16] to enable")
     parser.add_argument('--gpu', type=int, default=0, help="gpu id")
@@ -70,7 +70,7 @@ if __name__ == '__main__':
     parser.add_argument('--train_sam', action='store_true', help="train sam, use only after rgbsigma is converged")
     parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
     parser.add_argument('--mask3d_loss_weight', type=float, default=1.0, help="3d mask loss weight")
-    parser.add_argument('--label_regularization_weight', type=float, default=1.0, help="label regularization weight")
+    parser.add_argument('--label_regularization_weight', type=float, default=0., help="label regularization weight")
     parser.add_argument('--feature_dim', type=int, default=256, help="dimension of features")
     parser.add_argument('--load_feature', action='store_true', help="load the feature from some local directory")
     parser.add_argument('--augmentation', type=float, default=1.,  help="Augment training data using NeRF output if it is larger than 0.")    
@@ -134,7 +134,7 @@ if __name__ == '__main__':
 
     criterion = torch.nn.MSELoss(reduction='none') 
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     Trainer_ = SAMTrainer if opt.train_sam else Trainer
     Dataset_ = NeRFSAMDataset if opt.train_sam else NeRFDataset

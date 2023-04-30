@@ -980,16 +980,15 @@ class Trainer(object):
         self.local_step = 0
 
         for data in loader:
-            
             # update grid every 16 steps
-            if self.model.cuda_ray and self.global_step % self.opt.update_extra_interval == 0:
-                with torch.cuda.amp.autocast(enabled=self.fp16):
-                    self.model.update_extra_state()
+            # if self.model.cuda_ray and self.global_step % self.opt.update_extra_interval == 0:
+            #     with torch.cuda.amp.autocast(enabled=self.fp16):
+            #         self.model.update_extra_state()
                     
             self.local_step += 1
             self.global_step += 1
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=self.fp16):
                 preds, truths, loss = self.train_step(data)
@@ -1001,18 +1000,13 @@ class Trainer(object):
             if self.scheduler_update_every_step:
                 self.lr_scheduler.step()
 
-            loss_val = loss.item()
+            loss_val = loss.detach().item()
             total_loss += loss_val
 
             if self.local_rank == 0:
                 if self.report_metric_at_train:
                     for metric in self.metrics:
                         metric.update(preds, truths)
-                        
-                if self.use_tensorboardX:
-                    self.writer.add_scalar("train/loss", loss_val, self.global_step)
-                    self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]['lr'], self.global_step)
-
                 if self.scheduler_update_every_step:
                     pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f}), lr={self.optimizer.param_groups[0]['lr']:.6f}")
                 else:
@@ -1028,7 +1022,8 @@ class Trainer(object):
                         'local_step': self.local_step,
                         'global_step': self.global_step,
                     })
-
+            del preds, truths, loss
+            # print(torch.cuda.memory_summary())
         if self.ema is not None:
             self.ema.update()
 
