@@ -76,6 +76,9 @@ if __name__ == '__main__':
     parser.add_argument('--augmentation', type=float, default=1.,  help="Augment training data using NeRF output if it is larger than 0.")    
     parser.add_argument('--sam_checkpoint', type=str, default=None, help="dimension of features")
     parser.add_argument('--online', action='store_true', help="Online mode. Do not load features or images in advance")
+    parser.add_argument('--mask_loss_weight', type=float, default=0., help="mask loss weight")
+    parser.add_argument('--prompt_sample', type=str, default='uniform', choices=['uniform', 'random'],)
+    parser.add_argument('--sample_step', type=int, default=20)
     
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
     parser.add_argument('--dataset_name', type=str, default='nerf', choices=['nerf', '3dfront', 'scannet', 'hypersim'], 
@@ -140,7 +143,6 @@ if __name__ == '__main__':
     Dataset_ = NeRFSAMDataset if opt.train_sam else NeRFDataset
 
     if opt.test:
-        
         metrics = [PSNRMeter()]
         if not opt.train_sam:
             metrics.append(LPIPSMeter(device=device))
@@ -191,8 +193,11 @@ if __name__ == '__main__':
             density_thresh=opt.density_thresh,
             bg_radius=opt.bg_radius,
         )
-
-        predictor = SamPredictor(build_sam(checkpoint=opt.sam_checkpoint).eval())
+        sam = build_sam(checkpoint=opt.sam_checkpoint).eval()
+        
+        for param in sam.parameters():
+            param.requires_grad = False
+        predictor = SamPredictor(sam)
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 

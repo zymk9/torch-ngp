@@ -44,6 +44,18 @@ def custom_meshgrid(*args):
     else:
         return torch.meshgrid(*args, indexing='ij')
 
+def pt(obj):
+    if type(obj) is list or type(obj) is tuple:
+        shape_list = []
+        for i in obj:
+            shape_list.append(pt(i))
+        return shape_list
+    else:
+        return obj.shape
+def print_shape(obj):
+    shape = pt(obj)
+    print(shape)
+
 
 @torch.jit.script
 def linear_to_srgb(x):
@@ -149,6 +161,15 @@ def preprocess_feature(feature, H, W):
     crop_h, crop_w = int(np.floor(f_h * H / max_size)), int(np.floor(f_w * W / max_size))
     feature = feature[..., :crop_h, :crop_w]
 
+    return feature
+
+def postprocess_feature(feature, target_feature_size):
+    f_h, f_w = feature.shape[1], feature.shape[2]
+    features = feature.permute(0,3,1,2)
+    
+    padh = target_feature_size - f_h
+    padw = target_feature_size - f_w
+    feature = F.pad(features, (0, padw, 0, padh))
     return feature
 
 def seed_everything(seed):

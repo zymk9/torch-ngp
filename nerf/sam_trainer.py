@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from .utils import Trainer, preprocess_feature
+from .utils import Trainer, preprocess_feature, postprocess_feature, print_shape
 
 
 class SAMTrainer(Trainer):
@@ -26,6 +26,8 @@ class SAMTrainer(Trainer):
         self.feature_dim = self.model.feature_dim
         self.feature_size = feature_size
         self.predictor = predictor
+        if self.opt.mask_loss_weight > 0:
+            self.mask_criterion = torch.nn.BCEWithLogitsLoss()
         if predictor is not None:
             self.predictor.model.to(self.device)
         self.load_feature = load_feature
@@ -50,17 +52,6 @@ class SAMTrainer(Trainer):
         return F.pad(features, (0, padw, 0, padh)).numpy()[0]
 
 
-    def mask3d_loss(self, data):
-        coords = data['mask3d_coords'] # [N, 3]
-        labels = data['mask3d_labels'] # [N]
-
-        density_out = self.model.density(coords)
-        geo_feat = density_out['geo_feat']
-
-        mask_logits = self.model.mask(coords, geo_feat=geo_feat)
-        mask_loss = self.criterion(mask_logits, labels)
-
-        return mask_loss
 
     def label_regularization(self, depth, pred_masks):
         '''
@@ -87,6 +78,56 @@ class SAMTrainer(Trainer):
 
         return smoothness_loss
 
+    def generate_prompt(self, H, W):
+        if self.opt.prompt_sample == 'uniform':
+            y = torch.linspace(0, H, steps=self.opt.sample_step)
+            x = torch.linspace(0, W, steps=self.opt.sample_step)
+            
+            grid_x, grid_y = torch.meshgrid(x, y, indexing='ij')
+            input_point = torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], -1)
+            input_label = torch.ones(input_point.shape[0])
+            return input_point, input_label
+        elif self.opt.prompt_sample == 'random':
+            y = torch.randint(0, H, (self.opt.sample_step**2,))
+            x = torch.randint(0, W, (self.opt.sample_step**2,))
+            
+            pass
+            
+    
+    def mask_loss(self, pred_features, H, W):
+        input_point, input_label = self.generate_prompt(H, W)
+        with torch.no_grad():
+            gt_masks = []
+            for i in range(input_point.size(0)):
+                masks, scores, logits = self.predictor.predict(
+                    point_coords=input_point[i:i+1, :].numpy(),
+                    point_labels=input_label[i:i+1].numpy(),
+                    multimask_output=True,
+                )
+
+                gt_masks.append(masks[0].reshape(-1))
+            gt_masks = np.stack(gt_masks)
+            gt_masks = torch.from_numpy(gt_masks).to(torch.float32).to(self.device)
+
+        target_feature_size = self.predictor.model.image_encoder.img_size // self.predictor.model.image_encoder.patch_size
+        pred_features = postprocess_feature(pred_features, target_feature_size)
+
+        self.predictor.set_torch_feature(pred_features)
+        input_point = input_point.to(self.device)
+        input_label = input_label.to(self.device)
+        nerf_masks = []
+        for i in range(input_point.size(0)):
+            pred_masks, pred_scores, pred_logits = self.predictor.predict_torch(
+                    point_coords=input_point[i:i+1, :][None, ...],
+                    point_labels=input_label[i:i+1][None, ...],
+                    return_logits=True
+                )
+
+            nerf_masks.append(pred_masks[0][0].reshape(-1))     
+
+        nerf_masks = torch.stack(nerf_masks)
+        loss = self.mask_criterion(nerf_masks, gt_masks)
+        return loss
     def train_step(self, data):
 
         rays_o = data['rays_o'] # [B, N, 3]
@@ -152,7 +193,8 @@ class SAMTrainer(Trainer):
         if self.opt.label_regularization_weight > 0:
             loss = loss + self.label_regularization(outputs['depth'], pred_feature) * self.opt.label_regularization_weight
         
-        # if self.opt.
+        if self.opt.mask_loss_weight > 0:
+            loss = loss + self.mask_loss(pred_feature, data['full_H'], data['full_W'])
         
         # extra loss
         # pred_weights_sum = outputs['weights_sum'] + 1e-8
@@ -230,17 +272,23 @@ class SAMTrainer(Trainer):
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=True, 
                                     bg_color=bg_color, perturb=perturb, **vars(self.opt))
 
+        pred_feature = outputs['sam_feature'].reshape(B, H, W, -1)
+
+
+        rays_o = data['full_rays_o'] # [B, N, 3]
+        rays_d = data['full_rays_d'] # [B, N, 3]
+        B, H, W = rays_o.shape[0], data['full_H'], data['full_W']
+        outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=True, 
+                                    bg_color=bg_color, perturb=perturb, **vars(self.opt))
+
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
         pred_t_depth = outputs['t_depth'].reshape(-1, H, W)
-        pred_feature = outputs['sam_feature'].reshape(B, H, W, -1)
-
         return pred_rgb, pred_depth, pred_t_depth, pred_feature
 
     ### ------------------------------
 
     def test(self, loader, save_path=None, name=None, write_video=True):
-
         if save_path is None:
             save_path = os.path.join(self.workspace, 'results')
 
@@ -311,7 +359,6 @@ class SAMTrainer(Trainer):
                 np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_feature.npz'), res=res, embedding=f)
                 cv2.imwrite(os.path.join(save_path, 'frames', f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(r, cv2.COLOR_RGB2BGR))
                 depth_shape = d.shape
-                print(depth_shape)
                 d = d.reshape(-1).astype(np.float32)
                 np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_depth.npz'), size=depth_shape, depth=d)
                     
