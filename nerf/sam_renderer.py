@@ -275,7 +275,6 @@ class NeRFSAMRenderer(NeRFRenderer):
             # sigmas = density_outputs['sigma']
             # rgbs = self.color(xyzs, dirs, **density_outputs)
             sigmas = self.density_scale * sigmas
-
             #print(f'valid RGB query ratio: {mask.sum().item() / mask.shape[0]} (total = {mask.sum().item()})')
 
             # special case for CCNeRF's residual learning
@@ -591,5 +590,6 @@ class NeRFSAMRenderer(NeRFRenderer):
             results['sam_feature'] = sam_feature
 
         else:
+            print('yes')
             results = _run(rays_o, rays_d, render_feature, **kwargs)
         return results

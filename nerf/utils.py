@@ -901,6 +901,7 @@ class Trainer(object):
                 preds, truths, loss = self.train_step(data)
          
             self.scaler.scale(loss).backward()
+        
             self.scaler.step(self.optimizer)
             self.scaler.update()
             
@@ -1015,6 +1016,7 @@ class Trainer(object):
                 preds, truths, loss = self.train_step(data)
          
             self.scaler.scale(loss).backward()
+
             self.scaler.step(self.optimizer)
             self.scaler.update()
 

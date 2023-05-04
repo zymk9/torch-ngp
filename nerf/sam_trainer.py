@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
-from .utils import Trainer, preprocess_feature, postprocess_feature, print_shape
-
+from .utils import Trainer, preprocess_feature, postprocess_feature, print_shape, get_rays, linear_to_srgb
+import json
 
 class SAMTrainer(Trainer):
     def __init__(self, *args, feature_size=64, load_feature = True, predictor = None, **kwargs):
@@ -129,20 +129,7 @@ class SAMTrainer(Trainer):
         loss = self.mask_criterion(nerf_masks, gt_masks)
         return loss
     def train_step(self, data):
-
-        rays_o = data['rays_o'] # [B, N, 3]
-        rays_d = data['rays_d'] # [B, N, 3]
-        assert 'feature' in data or self.predictor is not None , \
-            "Need features for training"
-
-        B, N, _ = rays_o.shape
-        bg_color = 1
-
-        outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
-                                    force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
-        # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
-        
-        pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
+        bg_color = None
         if 'feature' in data:
             gt_feature = data['feature'] 
         else:
@@ -150,19 +137,36 @@ class SAMTrainer(Trainer):
                 if 'image' in data:
                     input_im = data['image']
                 else:
-                    input = self.model.render(data['full_rays_o'], data['full_rays_d'], render_feature=False, staged=True, bg_color=bg_color, 
-                                                perturb=True, **vars(self.opt))
-                    input_im = input['image'].reshape(B, data['full_H'], data['full_W'], 3)
+                    rays_o = data['full_rays_o'] # [B, N, 3]
+                    rays_d = data['full_rays_d'] # [B, N, 3]
+                    self.model.eval()
+                    input = self.model.render(rays_o, rays_d, render_feature=False, staged=True, bg_color=bg_color, 
+                                                perturb=False, **vars(self.opt))
+                    input_im = input['image'].reshape(-1, data['full_H'], data['full_W'], 3)
                     input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
-                    
+
                 self.predictor.set_image(input_im)
                 gt_feature = self.predictor.get_image_embedding().detach()
                 
                 if gt_feature.shape[0] != data['H'] or gt_feature.shape[1] != data['W']:
                     gt_feature = preprocess_feature(gt_feature, data['H'], data['W'])
+    
                 gt_feature = gt_feature.permute(0,2,3,1)
             gt_feature = gt_feature.to(self.device)
-        # MSE
+        
+        rays_o = data['rays_o'] # [B, N, 3]
+        rays_d = data['rays_d'] # [B, N, 3]
+        assert 'feature' in data or self.predictor is not None , \
+            "Need features for training"
+
+        B, N, _ = rays_o.shape
+        self.model.train()
+        outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
+                                    force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
+        # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
+
+        pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
+ 
         loss = self.criterion(pred_feature, gt_feature).mean(-1) # [B, N, feature_dim] --> [B, N]
 
         # patch-based rendering
@@ -218,7 +222,7 @@ class SAMTrainer(Trainer):
         H, W = data['H'], data['W']
 
         # eval with fixed background color
-        bg_color = 1
+        bg_color = None
         
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=True, 
                                     bg_color=bg_color, perturb=False, **vars(self.opt))
@@ -236,7 +240,7 @@ class SAMTrainer(Trainer):
                 else:
                     input = self.model.render(data['full_rays_o'], data['full_rays_d'], render_feature=False, staged=True, bg_color=bg_color, 
                                                 perturb=True, **vars(self.opt))
-                    input_im = input['image'].reshape(B, data['full_H'], data['full_W'], 3)
+                    input_im = input['image'].reshape(-1, data['full_H'], data['full_W'], 3)
                     input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
                     
                 self.predictor.set_image(input_im)
@@ -278,10 +282,13 @@ class SAMTrainer(Trainer):
         rays_o = data['full_rays_o'] # [B, N, 3]
         rays_d = data['full_rays_d'] # [B, N, 3]
         B, H, W = rays_o.shape[0], data['full_H'], data['full_W']
-        outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=True, 
+        outputs = self.model.render(rays_o, rays_d, render_feature=False, staged=True, 
                                     bg_color=bg_color, perturb=perturb, **vars(self.opt))
 
-        pred_rgb = outputs['image'].reshape(-1, H, W, 3)
+        pred_rgb = outputs['image'].reshape(-1, H, W, 3)               
+        pred_rgb = (pred_rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+        cv2.imwrite('test.png', cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR))
+        exit()
         pred_depth = outputs['depth'].reshape(-1, H, W)
         pred_t_depth = outputs['t_depth'].reshape(-1, H, W)
         return pred_rgb, pred_depth, pred_t_depth, pred_feature

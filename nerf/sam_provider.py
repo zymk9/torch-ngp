@@ -10,7 +10,7 @@ from scipy.spatial.transform import Slerp, Rotation
 import torch
 from torch.utils.data import DataLoader
 
-from .utils import get_rays, preprocess_feature
+from .utils import get_rays, preprocess_feature, print_shape
 from .provider import nerf_matrix_to_ngp
 
 class NeRFSAMDataset:
@@ -114,6 +114,7 @@ class NeRFSAMDataset:
             poses = [nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) for f0 in f]
 
             self.features = None
+            self.images = None
             self.poses = []
  
             for k in range(len(poses) - 1):
@@ -139,7 +140,7 @@ class NeRFSAMDataset:
                     self.features = []
                 else:
                     self.images = []
-            for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
+            for f in tqdm.tqdm(frames[:2], desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
 
                 if not os.path.exists(f_path) :
@@ -266,7 +267,7 @@ class NeRFSAMDataset:
             intrinsics = np.floor(self.intrinsics / scale)
             H = int(np.floor(self.H / scale))
             W = int(np.floor(self.W / scale))
-            rays = get_rays(poses, intrinsics, H, W, self.num_rays, error_map, self.opt.patch_size)
+            rays = get_rays(poses, intrinsics, H, W, -1, error_map, self.opt.patch_size)
             full_rays = get_rays(poses, self.intrinsics, self.H, self.W, -1, error_map, self.opt.patch_size)
 
             results = {
@@ -280,10 +281,10 @@ class NeRFSAMDataset:
                 'full_rays_o': full_rays['rays_o'],
                 'full_rays_d': full_rays['rays_d'],
                 'poses': poses,
+                'index': index[0],
                 'augment': True
             }
             return results
-  
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
@@ -292,7 +293,7 @@ class NeRFSAMDataset:
         intrinsics = np.floor(self.intrinsics / scale)
         H = int(np.floor(self.H / scale))
         W = int(np.floor(self.W / scale))
-        rays = get_rays(poses, intrinsics, H, W, self.num_rays, error_map, self.opt.patch_size)
+        rays = get_rays(poses, intrinsics, H, W, -1, error_map, self.opt.patch_size)
         full_rays = get_rays(poses, self.intrinsics, self.H, self.W, -1, error_map, self.opt.patch_size)
 
         results = {
@@ -306,6 +307,7 @@ class NeRFSAMDataset:
             'full_rays_o': full_rays['rays_o'],
             'full_rays_d': full_rays['rays_d'],
             'poses': poses,
+            'index': index[0],
             'augment': False
         }
 
