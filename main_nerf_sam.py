@@ -1,14 +1,14 @@
 import torch
 import argparse
 
-from nerf.provider import NeRFSAMDataset, NeRFDataset
+from nerf.provider import NeRFDataset
+from nerf.sam_provider import NeRFSAMDataset
 # from nerf.gui import NeRFGUI
 from nerf.utils import *
+from nerf.sam_trainer import SAMTrainer
 
-from functools import partial
-from loss import huber_loss
+from segment_anything import build_sam, SamPredictor 
 
-import wandb
 
 torch.autograd.set_detect_anomaly(True)
 
@@ -31,7 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
     parser.add_argument('--num_steps', type=int, default=512, help="num steps sampled per ray (only valid when NOT using --cuda_ray)")
     parser.add_argument('--upsample_steps', type=int, default=0, help="num steps up-sampled per ray (only valid when NOT using --cuda_ray)")
-    parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
+    parser.add_argument('--update_extra_interval', type=int, default=2, help="iter interval to update extra status (only valid when using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096, help="batch size of rays at inference to avoid OOM (only valid when NOT using --cuda_ray)")
     parser.add_argument('--patch_size', type=int, default=1, help="[experimental] render patches in training, so as to apply LPIPS loss. 1 means disabled, use [64, 32, 16] to enable")
     parser.add_argument('--gpu', type=int, default=0, help="gpu id")
@@ -67,20 +67,25 @@ if __name__ == '__main__':
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
 
     ### mask training options
-    parser.add_argument('--train_sam', action='store_true', help="train mask, use only after rgbsigma is converged")
+    parser.add_argument('--train_sam', action='store_true', help="train sam, use only after rgbsigma is converged")
     parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
     parser.add_argument('--mask3d_loss_weight', type=float, default=0.0, help="3d mask loss weight")
     parser.add_argument('--label_regularization_weight', type=float, default=0.0, help="label regularization weight")
     parser.add_argument('--feature_dim', type=int, default=256, help="dimension of features")
-
-
+    parser.add_argument('--load_feature', action='store_true', help="load the feature from some local directory")
+    parser.add_argument('--augmentation', type=float, default=1.,  help="Augment training data using NeRF output if it is larger than 0.")    
+    parser.add_argument('--sam_checkpoint', type=str, default=None, help="dimension of features")
+    parser.add_argument('--online', action='store_true', help="Online mode. Do not load features or images in advance")
+    parser.add_argument('--mask_loss_weight', type=float, default=0., help="mask loss weight")
+    parser.add_argument('--prompt_sample', type=str, default='uniform', choices=['uniform', 'random'],)
+    parser.add_argument('--sample_step', type=int, default=20)
+    
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
-    parser.add_argument('--dataset_name', type=str, default='default', choices=['3dfront', 'scannet', 'hypersim'], 
+    parser.add_argument('--dataset_name', type=str, default='nerf', choices=['nerf', '3dfront', 'scannet', 'hypersim'], 
                         help='A dataset name for wandb logging')
+    
 
     opt = parser.parse_args()
-
-    torch.cuda.set_device(opt.gpu)
 
     if opt.O:
         opt.fp16 = True
@@ -132,7 +137,7 @@ if __name__ == '__main__':
 
     criterion = torch.nn.MSELoss(reduction='none') 
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     Trainer_ = SAMTrainer if opt.train_sam else Trainer
     Dataset_ = NeRFSAMDataset if opt.train_sam else NeRFDataset
@@ -142,10 +147,10 @@ if __name__ == '__main__':
         if not opt.train_sam:
             metrics = [PSNRMeter(), LPIPSMeter(device=device)]
         else:
-            metrics = []
+            metrics = [MSEMeter()]
 
-        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2, feature_dim=opt.feature_dim,
-                               downscale=1 if not opt.train_sam else 1).dataloader()
+        test_loader = Dataset_(opt, device=device, type='train', n_test_per_pose=10, feature_dim=opt.feature_dim, 
+                               dataset_name=opt.dataset_name).dataloader()
         feature_dim = test_loader._data.feature_dim if opt.train_sam else None
 
         model = NeRFNetwork(
@@ -157,8 +162,9 @@ if __name__ == '__main__':
             density_thresh=opt.density_thresh,
             bg_radius=opt.bg_radius,
         )
-        print(model)
-
+        
+        
+  
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, 
                            fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)                         
 
@@ -170,15 +176,15 @@ if __name__ == '__main__':
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
     
-            trainer.test(test_loader, write_video=False) # test and save video
+            trainer.test(test_loader, write_video=True) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)
     
     else:
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
-        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim,
-                                downscale=1 if not opt.train_sam else 1).dataloader()
+        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim, 
+                                dataset_name=opt.dataset_name).dataloader()
 
         model = NeRFNetwork(
             encoding="hashgrid",
@@ -189,35 +195,38 @@ if __name__ == '__main__':
             density_thresh=opt.density_thresh,
             bg_radius=opt.bg_radius,
         )
-        print(model)
-
+        sam = build_sam(checkpoint=opt.sam_checkpoint).eval()
+        
+        for param in sam.parameters():
+            param.requires_grad = False
+        predictor = SamPredictor(sam)
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
         if not opt.train_sam:
             metrics = [PSNRMeter(), LPIPSMeter(device=device)]
         else:
-            metrics = []
+            metrics = [MSEMeter()]
 
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
                            scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, 
-                           eval_interval=10, load_model_only=opt.load_model_only,)
+                           eval_interval=10, load_model_only=opt.load_model_only, load_feature = opt.load_feature,
+                           predictor=predictor)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)
             gui.render()
         
         else:
-            valid_loader = Dataset_(opt, device=device, type='val', 
-                                    downscale=1 if not opt.train_sam else 1).dataloader()
+            valid_loader = Dataset_(opt, device=device, type='train', downscale=1, 
+                                    dataset_name=opt.dataset_name).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
 
             # also test
-            test_loader = Dataset_(opt, device=device, type='test_all',
-                                   downscale=1 if not opt.train_sam else 1).dataloader()
+            test_loader = Dataset_(opt, device=device, type='test', dataset_name=opt.dataset_name).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.

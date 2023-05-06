@@ -123,12 +123,12 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
+            test_loader = NeRFDataset(opt, device=device, type='test_all').dataloader()
 
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
     
-            trainer.test(test_loader, write_video=True) # test and save video
+            trainer.test(test_loader, write_video=False) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)
     

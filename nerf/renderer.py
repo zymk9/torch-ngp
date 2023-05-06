@@ -223,6 +223,7 @@ class NeRFRenderer(nn.Module):
         
         # calculate depth 
         ori_z_vals = ((z_vals - nears) / (fars - nears)).clamp(0, 1)
+
         depth = torch.sum(weights * ori_z_vals, dim=-1)
 
         # calculate color
@@ -287,7 +288,7 @@ class NeRFRenderer(nn.Module):
 
             #plot_pointcloud(xyzs.reshape(-1, 3).detach().cpu().numpy())
             
-            sigmas, rgbs = self(xyzs, dirs)
+            sigmas, rgbs, sam_f = self(xyzs, dirs)
             # density_outputs = self.density(xyzs) # [M,], use a dict since it may include extra things, like geo_feat for rgb.
             # sigmas = density_outputs['sigma']
             # rgbs = self.color(xyzs, dirs, **density_outputs)

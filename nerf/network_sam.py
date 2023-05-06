@@ -180,15 +180,18 @@ class NeRFNetwork(NeRFSAMRenderer):
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
         sam_f = s_sam
-        
-        if self.sam_view_dependent:
+                
+        if self.view_dependent:
+            s_sam = F.relu(s_sam, inplace=True)         
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
+
             for l in range(self.num_layers_sam_dir):
                 h_sam = self.sam_dir_net[l](h_sam)
                 if l != self.num_layers_sam_dir - 1:
                     h_sam = F.relu(h_sam, inplace=True)
             sam_f = h_sam
+            
         return sigma, color, sam_f
 
     def density(self, x):
@@ -274,8 +277,9 @@ class NeRFNetwork(NeRFSAMRenderer):
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
         sam_f = s_sam
-        
-        if self.sam_view_dependent:
+                
+        if self.view_dependent:
+            s_sam = F.relu(s_sam, inplace=True)         
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
             for l in range(self.num_layers_sam_dir):
