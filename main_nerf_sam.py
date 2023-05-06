@@ -69,8 +69,8 @@ if __name__ == '__main__':
     ### mask training options
     parser.add_argument('--train_sam', action='store_true', help="train mask, use only after rgbsigma is converged")
     parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
-    parser.add_argument('--mask3d_loss_weight', type=float, default=1.0, help="3d mask loss weight")
-    parser.add_argument('--label_regularization_weight', type=float, default=1.0, help="label regularization weight")
+    parser.add_argument('--mask3d_loss_weight', type=float, default=0.0, help="3d mask loss weight")
+    parser.add_argument('--label_regularization_weight', type=float, default=0.0, help="label regularization weight")
     parser.add_argument('--feature_dim', type=int, default=256, help="dimension of features")
 
 
@@ -139,13 +139,13 @@ if __name__ == '__main__':
 
     if opt.test:
         
-        metrics = [PSNRMeter()]
         if not opt.train_sam:
-            metrics.append(LPIPSMeter(device=device))
+            metrics = [PSNRMeter(), LPIPSMeter(device=device)]
         else:
-            metrics.append(MeanIoUMeter())
+            metrics = []
 
-        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2, feature_dim=opt.feature_dim).dataloader()
+        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2, feature_dim=opt.feature_dim,
+                               downscale=1 if not opt.train_sam else 1).dataloader()
         feature_dim = test_loader._data.feature_dim if opt.train_sam else None
 
         model = NeRFNetwork(
@@ -177,7 +177,8 @@ if __name__ == '__main__':
     else:
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
-        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim).dataloader()
+        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim,
+                                downscale=1 if not opt.train_sam else 1).dataloader()
 
         model = NeRFNetwork(
             encoding="hashgrid",
@@ -193,11 +194,10 @@ if __name__ == '__main__':
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
-        metrics = [PSNRMeter()]
         if not opt.train_sam:
-            metrics.append(LPIPSMeter(device=device))
+            metrics = [PSNRMeter(), LPIPSMeter(device=device)]
         else:
-            metrics.append(MeanIoUMeter())
+            metrics = []
 
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
@@ -209,13 +209,15 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            valid_loader = Dataset_(opt, device=device, type='val', downscale=1).dataloader()
+            valid_loader = Dataset_(opt, device=device, type='val', 
+                                    downscale=1 if not opt.train_sam else 1).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
 
             # also test
-            test_loader = Dataset_(opt, device=device, type='test').dataloader()
+            test_loader = Dataset_(opt, device=device, type='test_all',
+                                   downscale=1 if not opt.train_sam else 1).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.

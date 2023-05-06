@@ -20,17 +20,17 @@ class NeRFNetwork(NeRFSAMRenderer):
                  num_layers_bg=2,
                  hidden_dim_bg=64,
                  num_layers_sam=3,
-                 hidden_dim_sam=128,
+                 hidden_dim_sam=256,
                  num_layers_sam_dir=3,
-                 hidden_dim_sam_dir=128,
-                 feature_dim=256,       # including background
+                 hidden_dim_sam_dir=256,
+                 feature_dim=256,       # sam embedding dim (256)
                  bound=1,
-                 view_dependent=True,
+                 sam_view_dependent=True,
                  **kwargs,
                  ):
         super().__init__(bound, feature_dim=feature_dim, **kwargs)
 
-        self.view_dependent = view_dependent
+        self.sam_view_dependent = sam_view_dependent
         # sigma network
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
@@ -77,10 +77,10 @@ class NeRFNetwork(NeRFSAMRenderer):
         # sam feature network
         self.num_layers_sam = num_layers_sam
         self.hidden_dim_sam = hidden_dim_sam
-        self.encoder_sam, self.in_dim_sam = get_encoder(encoding, num_levels=16, level_dim=8, 
+        self.encoder_sam, self.in_dim_sam = get_encoder(encoding, num_levels=32, level_dim=8, 
                                                         log2_hashmap_size=21,
                                                         desired_resolution=2048 * bound)
-        
+
         sam_net = []
         for l in range(num_layers_sam):
             if l == 0:
@@ -89,10 +89,7 @@ class NeRFNetwork(NeRFSAMRenderer):
                 in_dim = hidden_dim_sam
             
             if l == num_layers_sam - 1:
-                if self.view_dependent:
-                    out_dim = hidden_dim_sam
-                else:
-                    out_dim = feature_dim
+                out_dim = hidden_dim_sam if self.sam_view_dependent else feature_dim
             else:
                 out_dim = hidden_dim_sam
 
@@ -100,12 +97,14 @@ class NeRFNetwork(NeRFSAMRenderer):
 
         self.sam_net = nn.ModuleList(sam_net)
 
-        self.num_layers_sam_dir = num_layers_sam_dir        
-        self.hidden_dim_sam_dir = hidden_dim_sam_dir
-        self.encoder_sam_dir, self.in_dim_sam_dir = get_encoder(encoding_dir)
+        if self.sam_view_dependent:
+            self.num_layers_sam_dir = num_layers_sam_dir
+            self.hidden_dim_sam_dir = hidden_dim_sam_dir
+            self.encoder_sam_dir, self.in_dim_sam_dir = get_encoder(encoding_dir, num_levels=32, level_dim=8, 
+                                                                    log2_hashmap_size=21,
+                                                                    desired_resolution=2048 * bound)
         
-        if self.view_dependent:
-            sam_dir_net =  []
+            sam_dir_net = []
             for l in range(num_layers_sam_dir):
                 if l == 0:
                     in_dim = self.in_dim_sam_dir + self.hidden_dim_sam
@@ -113,14 +112,13 @@ class NeRFNetwork(NeRFSAMRenderer):
                     in_dim = hidden_dim_sam_dir
                 
                 if l == num_layers_sam_dir - 1:
-                    out_dim = feature_dim # 3 rgb
+                    out_dim = feature_dim
                 else:
                     out_dim = hidden_dim_sam_dir
-                
+
                 sam_dir_net.append(nn.Linear(in_dim, out_dim, bias=False))
 
             self.sam_dir_net = nn.ModuleList(sam_dir_net)
-
 
         # background network
         if self.bg_radius > 0:
@@ -165,8 +163,8 @@ class NeRFNetwork(NeRFSAMRenderer):
         geo_feat = h[..., 1:]
 
         # color
-        d = self.encoder_dir(d)
-        h = torch.cat([d, geo_feat], dim=-1)
+        d_color = self.encoder_dir(d)
+        h = torch.cat([d_color, geo_feat], dim=-1)
         for l in range(self.num_layers_color):
             h = self.color_net[l](h)
             if l != self.num_layers_color - 1:
@@ -181,16 +179,16 @@ class NeRFNetwork(NeRFSAMRenderer):
             s_sam = self.sam_net[l](s_sam)
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
-        sam_f = torch.sigmoid(s_sam)
+        sam_f = s_sam
         
-        if self.view_dependent:
+        if self.sam_view_dependent:
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
-            for l in range(self.num_layers_color):
-                h_sam = self.color_net[l](h_sam)
-                if l != self.num_layers_color - 1:
-                    h = F.relu(h, inplace=True)
-            sam_f = torch.sigmoid(h_sam)
+            for l in range(self.num_layers_sam_dir):
+                h_sam = self.sam_dir_net[l](h_sam)
+                if l != self.num_layers_sam_dir - 1:
+                    h_sam = F.relu(h_sam, inplace=True)
+            sam_f = h_sam
         return sigma, color, sam_f
 
     def density(self, x):
@@ -263,36 +261,35 @@ class NeRFNetwork(NeRFSAMRenderer):
         # x: [N, 3] in [-bound, bound]
         # mask: [N,], bool, indicates where we actually needs to compute rgb.
         if mask is not None:
-            sam_f = torch.zeros(mask.shape[0], 3, dtype=x.dtype, device=x.device) # [N, 3]
+            output = torch.zeros(mask.shape[0], 3, dtype=x.dtype, device=x.device) # [N, 3]
             # in case of empty mask
             if not mask.any():
-                return sam_f
+                return output
             x = x[mask]
             d = d[mask]
-            geo_feat = geo_feat[mask]
+
         s_sam = self.encoder_sam(x, bound=self.bound)
         for l in range(self.num_layers_sam):
             s_sam = self.sam_net[l](s_sam)
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
-        output = torch.sigmoid(s_sam)
-                
-        if self.view_dependent:
+        sam_f = s_sam
+        
+        if self.sam_view_dependent:
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
-
             for l in range(self.num_layers_sam_dir):
                 h_sam = self.sam_dir_net[l](h_sam)
                 if l != self.num_layers_sam_dir - 1:
                     h_sam = F.relu(h_sam, inplace=True)
-            output = torch.sigmoid(h_sam)
+            sam_f = h_sam
             
         if mask is not None:
-            sam_f[mask] = output.to(sam_f.dtype) # fp16 --> fp32
+            output[mask] = sam_f.to(output.dtype) # fp16 --> fp32
         else:
-            sam_f = output
+            output = sam_f
             
-        return sam_f
+        return output
 
     # optimizer utils
     def get_params(self, lr):
@@ -305,7 +302,7 @@ class NeRFNetwork(NeRFSAMRenderer):
             {'params': self.encoder_sam.parameters(), 'lr': lr},
             {'params': self.sam_net.parameters(), 'lr': lr},
         ]
-        if self.view_dependent:
+        if self.sam_view_dependent:
             params.append({'params': self.encoder_sam_dir.parameters(), 'lr': lr})
             params.append({'params': self.sam_dir_net.parameters(), 'lr': lr})
         if self.bg_radius > 0:

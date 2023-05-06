@@ -67,7 +67,7 @@ class NeRFSAMRenderer(NeRFRenderer):
                  min_near=0.2,
                  density_thresh=0.01,
                  bg_radius=-1,
-                 feature_dim=2,
+                 feature_dim=256,
                  ):
         super().__init__(bound, cuda_ray, density_scale, min_near, density_thresh, bg_radius)
 
@@ -83,7 +83,7 @@ class NeRFSAMRenderer(NeRFRenderer):
     def color(self, x, d, mask=None, **kwargs):
         raise NotImplementedError()
 
-    def mask(self, x, mask=None, **kwargs):
+    def sam(self, x, d, mask=None, **kwargs):
         raise NotImplementedError()
 
     def run(self, rays_o, rays_d, render_feature, num_steps=128, upsample_steps=128, bg_color=None, perturb=False, **kwargs):
@@ -210,7 +210,7 @@ class NeRFSAMRenderer(NeRFRenderer):
 
         # calculate sam feature
         if render_feature:
-            sam_feature = torch.sum(weights.unsqueeze(-1) * sam_feature, dim=-2) # [N, num_instances]
+            sam_feature = torch.sum(weights.unsqueeze(-1) * sam_feature, dim=-2) # [N, sam_dim]
             sam_feature = sam_feature.view(*prefix, self.feature_dim)
         else:
             sam_feature = None
@@ -293,12 +293,12 @@ class NeRFSAMRenderer(NeRFRenderer):
                     depths.append(depth.view(*prefix))
 
                     if render_mask:
-                        masks_out.append(mask_out.view(*prefix, self.num_instances))
+                        masks_out.append(mask_out.view(*prefix, self.feature_dim))
             
                 depth = torch.stack(depths, axis=0) # [K, B, N]
                 image = torch.stack(images, axis=0) # [K, B, N, 3]
                 if render_mask:
-                    mask_logits = torch.stack(masks_out, axis=0) # [K, B, N, num_instances]
+                    mask_logits = torch.stack(masks_out, axis=0) # [K, B, N, sam_dim]
 
             else:
 
@@ -314,7 +314,7 @@ class NeRFSAMRenderer(NeRFRenderer):
                 depth = depth.view(*prefix)
 
                 if render_mask:
-                    mask_logits = mask_out.view(*prefix, self.num_instances)
+                    mask_logits = mask_out.view(*prefix, self.feature_dim)
             
             results['weights_sum'] = weights_sum
 
@@ -330,7 +330,7 @@ class NeRFSAMRenderer(NeRFRenderer):
             depth = torch.zeros(N, dtype=dtype, device=device)
             image = torch.zeros(N, 3, dtype=dtype, device=device)
             if render_mask:
-                mask_logits = torch.zeros(N, self.num_instances, dtype=dtype, device=device)
+                mask_logits = torch.zeros(N, self.feature_dim, dtype=dtype, device=device)
             
             n_alive = N
             rays_alive = torch.arange(n_alive, dtype=torch.int32, device=device) # [N]
@@ -362,7 +362,7 @@ class NeRFSAMRenderer(NeRFRenderer):
                     raymarching.composite_rays(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image, T_thresh)
                 else:
                     raymarching.composite_rays_with_masks(
-                        n_alive, n_step, self.num_instances, rays_alive, rays_t, sigmas, rgbs, masks, deltas, 
+                        n_alive, n_step, self.feature_dim, rays_alive, rays_t, sigmas, rgbs, masks, deltas, 
                         weights_sum, depth, image, mask_logits, T_thresh
                     )
 
@@ -377,11 +377,11 @@ class NeRFSAMRenderer(NeRFRenderer):
             image = image.view(*prefix, 3)
             depth = depth.view(*prefix)
             if render_mask:
-                mask_logits = mask_logits.view(*prefix, self.num_instances)
+                mask_logits = mask_logits.view(*prefix, self.feature_dim)
         
         results['depth'] = depth
         results['image'] = image
-        results['instance_mask_logits'] = mask_logits if render_mask else None
+        results['sam_feature'] = mask_logits if render_mask else None
 
         return results
 

@@ -11,6 +11,7 @@ import trimesh
 
 import torch
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 from .utils import get_rays
 
@@ -94,7 +95,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 
 
 class NeRFDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test=10):
+    def __init__(self, opt, device, type='train', downscale=1, n_test=10, **kwargs):
         super().__init__()
         
         self.opt = opt
@@ -693,24 +694,22 @@ class NeRFSAMDataset:
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
                 with np.load(f_path) as data:
-                    res = data['res']
+                    self.encoder_img_size = data['encoder_img_size']
+                    self.input_size = data['input_size']
+                    self.original_size = data['original_size']
                     feature = data['embedding']
-                    feature = feature.reshape(res.tolist())
-                    feature = feature.transpose(1, 2, 0)
 
-                assert feature.shape[-1] == self.feature_dim , \
+                assert feature.shape[0] == self.feature_dim , \
                     f'feature dimension does not match.'
 
-                # resize the features to fit the image size
-                if feature.shape[0] != self.H or feature.shape[1] != self.W:
-                    feature = cv2.resize(feature, (self.W, self.H), interpolation=cv2.INTER_NEAREST)
+                feature = torch.from_numpy(feature)
 
                 self.poses.append(pose)
                 self.features.append(feature)
             
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.features is not None:
-            self.features = torch.from_numpy(np.stack(self.features, axis=0)) # [N, H, W, C]
+            self.features = torch.stack(self.features, dim=0) # [N, H, W, C]
         
         # calculate mean radius of all camera poses
         self.radius = self.poses[:, :3, 3].norm(dim=-1).mean(0).item()
@@ -782,10 +781,16 @@ class NeRFSAMDataset:
         }
 
         if self.features is not None:
-            features = self.features[index].to(self.device) # [B, H, W, C]
-            a = features.view(B, -1, self.feature_dim)[0,rays['inds'][0]]
 
-            
+            # resize the features to fit the image size
+            features = self.features[index].to(self.device) # [B, C, H, W]
+            if self.downscale == 1:
+                features = self.transform_sam_embedding(features, self.encoder_img_size, self.input_size, self.original_size)
+            features = torch.permute(features, (0, 2, 3, 1))  # [B, H, W, C]
+            if self.downscale == 10:
+                features = features[:, :48, :64, :]
+
+            # a = features.view(B, -1, self.feature_dim)[0,rays['inds'][0]]
 
             if self.training:
                 features = torch.gather(features.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
@@ -810,3 +815,31 @@ class NeRFSAMDataset:
         loader._data = self # an ugly fix... we need to access error_map & poses in trainer.
         loader.has_gt = self.features is not None
         return loader
+
+    # From https://github.com/facebookresearch/segment-anything/blob/main/segment_anything/modeling/sam.py#L133
+    def transform_sam_embedding(self, masks, encoder_img_size, input_size, original_size):
+        """
+        Remove padding and upscale masks to the original image size.
+
+        Arguments:
+          masks (torch.Tensor): Batched masks from the mask_decoder,
+            in BxCxHxW format.
+          encoder_img_size (int): The size of the image input to the encoder.
+          input_size (tuple(int, int)): The size of the image input to the
+            model, in (H, W) format. Used to remove padding.
+          original_size (tuple(int, int)): The original size of the image
+            before resizing for input to the model, in (H, W) format.
+
+        Returns:
+          (torch.Tensor): Batched masks in BxCxHxW format, where (H, W)
+            is given by original_size.
+        """
+        masks = F.interpolate(
+            masks,
+            (encoder_img_size, encoder_img_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+        masks = masks[..., : input_size[0], : input_size[1]]
+        masks = F.interpolate(masks, (original_size[0], original_size[1]), mode="bilinear", align_corners=False)
+        return masks
