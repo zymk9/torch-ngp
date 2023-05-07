@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from .utils import get_rays, preprocess_feature, print_shape
 from .provider import nerf_matrix_to_ngp
 
+
 class NeRFSAMDataset:
     def __init__(self, opt, device, type='train', downscale=1, n_test_per_pose=10, n_test_poses=2, feature_dim=256,
                  feature_size=64, sam_image_size= 1024, dataset_name='nerf'):
@@ -134,12 +135,12 @@ class NeRFSAMDataset:
             self.features = None
             self.images = None
             
-            
             if not self.opt.online:
                 if opt.load_feature:
                     self.features = []
                 else:
                     self.images = []
+
             for f in tqdm.tqdm(frames[:2], desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
 
@@ -170,7 +171,7 @@ class NeRFSAMDataset:
                     
                     self.features.append(torch.from_numpy(feature))
                 else:
-                    image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
+                    image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] or [H, W, 4]
                     if self.H is None or self.W is None:
                         self.H = image.shape[0] // downscale
                         self.W = image.shape[1] // downscale
@@ -259,10 +260,8 @@ class NeRFSAMDataset:
             pose[:3, :3] = slerp(ratio).as_matrix()
             pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
             
-            
             poses = torch.from_numpy(pose[None,...]).to(self.device) # [B, 4, 4]
             error_map = None if self.error_map is None else self.error_map[index]
-            
             
             intrinsics = np.floor(self.intrinsics / scale)
             H = int(np.floor(self.H / scale))
@@ -284,11 +283,12 @@ class NeRFSAMDataset:
                 'index': index[0],
                 'augment': True
             }
+
             return results
+        
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
-        
         
         intrinsics = np.floor(self.intrinsics / scale)
         H = int(np.floor(self.H / scale))

@@ -14,6 +14,7 @@ import torch.distributed as dist
 from .utils import Trainer, preprocess_feature, postprocess_feature, print_shape, get_rays, linear_to_srgb
 import json
 
+
 class SAMTrainer(Trainer):
     def __init__(self, *args, feature_size=64, load_feature = True, predictor = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -42,16 +43,14 @@ class SAMTrainer(Trainer):
         target_feature_size = self.feature_size
         f_h, f_w = features.shape[1:]
         max_length = max(f_h, f_w)
-        h,w = int(np.floor(target_feature_size * f_h / max_length)), int(np.floor(target_feature_size * f_w / max_length))
-        features = cv2.resize(features.transpose(1,2,0), (w,h), interpolation = cv2.INTER_LINEAR  )
-        features = features.transpose(2,0,1)
-        features = torch.from_numpy(features[None,...])
+        h, w = int(np.floor(target_feature_size * f_h / max_length)), int(np.floor(target_feature_size * f_w / max_length))
+        features = cv2.resize(features.transpose(1, 2, 0), (w, h), interpolation=cv2.INTER_LINEAR)
+        features = features.transpose(2, 0, 1)
+        features = torch.from_numpy(features[None, ...])
         
         padh = target_feature_size - h
         padw = target_feature_size - w
         return F.pad(features, (0, padw, 0, padh)).numpy()[0]
-
-
 
     def label_regularization(self, depth, pred_masks):
         '''
@@ -93,7 +92,6 @@ class SAMTrainer(Trainer):
             
             pass
             
-    
     def mask_loss(self, pred_features, H, W):
         input_point, input_label = self.generate_prompt(H, W)
         with torch.no_grad():
@@ -128,6 +126,7 @@ class SAMTrainer(Trainer):
         nerf_masks = torch.stack(nerf_masks)
         loss = self.mask_criterion(nerf_masks, gt_masks)
         return loss
+    
     def train_step(self, data):
         bg_color = None
         if 'feature' in data:
@@ -141,14 +140,18 @@ class SAMTrainer(Trainer):
                     rays_d = data['full_rays_d'] # [B, N, 3]
                     self.model.eval()
                     input = self.model.render(rays_o, rays_d, render_feature=False, staged=True, bg_color=bg_color, 
-                                                perturb=False, **vars(self.opt))
+                                              perturb=False, force_all_rays=True, **vars(self.opt))
                     input_im = input['image'].reshape(-1, data['full_H'], data['full_W'], 3)
+
+                    print(input_im.shape, data['full_H'], data['full_W'])
+
                     input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
 
+                imageio.imsave(os.path.join(self.workspace, 'input.png'), input_im)
                 self.predictor.set_image(input_im)
                 gt_feature = self.predictor.get_image_embedding().detach()
                 
-                if gt_feature.shape[0] != data['H'] or gt_feature.shape[1] != data['W']:
+                if gt_feature.shape[-2] != data['H'] or gt_feature.shape[-1] != data['W']:
                     gt_feature = preprocess_feature(gt_feature, data['H'], data['W'])
     
                 gt_feature = gt_feature.permute(0,2,3,1)
@@ -238,8 +241,8 @@ class SAMTrainer(Trainer):
                 if 'image' in data:
                     input_im = data['image']
                 else:
-                    input = self.model.render(data['full_rays_o'], data['full_rays_d'], render_feature=False, staged=True, bg_color=bg_color, 
-                                                perturb=True, **vars(self.opt))
+                    input = self.model.render(data['full_rays_o'], data['full_rays_d'], render_feature=False, 
+                                              staged=True, bg_color=bg_color, perturb=True, **vars(self.opt))
                     input_im = input['image'].reshape(-1, data['full_H'], data['full_W'], 3)
                     input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
                     
@@ -250,8 +253,6 @@ class SAMTrainer(Trainer):
                     gt_feature = preprocess_feature(gt_feature, data['H'], data['W'])
                 gt_feature = gt_feature.permute(0,2,3,1)
                 
-                
-                
         loss = self.criterion(pred_feature, gt_feature).mean()
 
         if self.opt.label_regularization_weight > 0:
@@ -260,7 +261,6 @@ class SAMTrainer(Trainer):
         if self.opt.mask3d_loss_weight > 0:
             mask3d_loss = self.mask3d_loss(data)
             loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
-
 
         return pred_rgb, pred_depth, pred_feature, gt_feature, loss
     
@@ -286,9 +286,8 @@ class SAMTrainer(Trainer):
                                     bg_color=bg_color, perturb=perturb, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)               
-        pred_rgb = (pred_rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
-        cv2.imwrite('test.png', cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR))
-        exit()
+        # pred_rgb = (pred_rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
+        
         pred_depth = outputs['depth'].reshape(-1, H, W)
         pred_t_depth = outputs['t_depth'].reshape(-1, H, W)
         return pred_rgb, pred_depth, pred_t_depth, pred_feature
@@ -343,31 +342,22 @@ class SAMTrainer(Trainer):
                 else:
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
                     
-                    depth_shape = pred_t_depth.shape
-                    pred_t_depth = pred_t_depth.reshape(-1).astype(np.float32)
-                    np.savez(os.path.join(save_path, f'{name}_{i:04d}_depth.npz'), size=depth_shape, depth=pred_t_depth)
+                    np.save(os.path.join(save_path, f'{name}_{i:04d}_depth.npy'), pred_t_depth)
                     
-                    pred_feature = pred_feature.transpose(2,0,1)
-                    pred_feature = self.postprocess(pred_feature)
-                    res = np.array(pred_feature.shape)
-                    pred_feature = pred_feature.reshape(-1).astype(np.float32)
-                    np.savez(os.path.join(save_path, f'{name}_{i:04d}_feature.npz'), res=res, embedding=pred_feature)
-
+                    # pred_feature = pred_feature.transpose(2,0,1)
+                    # pred_feature = self.postprocess(pred_feature)
+                    np.save(os.path.join(save_path, f'{name}_{i:04d}_feature.npy'), pred_feature)
                     
                 pbar.update(loader.batch_size)
         
         if write_video:
             os.makedirs(os.path.join(save_path, 'frames'), exist_ok=True)
             for i, (r,d,f) in tqdm.tqdm(enumerate(zip(all_preds, all_preds_t_depth, all_preds_feature))):
-                f = f.transpose(2,0,1)
-                f = self.postprocess(f)
-                res = np.array(f.shape)
-                f = f.reshape(-1).astype(np.float32)
-                np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_feature.npz'), res=res, embedding=f)
+                # f = f.transpose(2,0,1)
+                # f = self.postprocess(f)
+                np.save(os.path.join(save_path, 'frames', f'{name}_{i:04d}_feature.npy'), f)
                 cv2.imwrite(os.path.join(save_path, 'frames', f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(r, cv2.COLOR_RGB2BGR))
-                depth_shape = d.shape
-                d = d.reshape(-1).astype(np.float32)
-                np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_depth.npz'), size=depth_shape, depth=d)
+                np.save(os.path.join(save_path, 'frames', f'{name}_{i:04d}_depth.npy'), d)
                     
             all_poses = {'poses': all_poses} 
             all_poses = json.dumps(all_poses, indent=4)
@@ -380,9 +370,7 @@ class SAMTrainer(Trainer):
             all_preds_depth = np.stack(all_preds_depth, axis=0)
             imageio.mimwrite(os.path.join(save_path, f'{name}_rgb.mp4'), all_preds, fps=25, quality=8, macro_block_size=1)
             imageio.mimwrite(os.path.join(save_path, f'{name}_depth.mp4'), all_preds_depth, fps=25, quality=8, macro_block_size=1)
-
-                
-                
+       
         self.log(f"==> Finished Test.")
 
     # [GUI] test on a single image

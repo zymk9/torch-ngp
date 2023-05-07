@@ -25,12 +25,12 @@ class NeRFNetwork(NeRFSAMRenderer):
                  hidden_dim_sam_dir=256,
                  feature_dim=256,       # sam embedding dim (256)
                  bound=1,
-                 sam_view_dependent=True,
+                 view_dependent=True,
                  **kwargs,
                  ):
         super().__init__(bound, feature_dim=feature_dim, **kwargs)
 
-        self.sam_view_dependent = sam_view_dependent
+        self.view_dependent = view_dependent
         # sigma network
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
@@ -89,7 +89,7 @@ class NeRFNetwork(NeRFSAMRenderer):
                 in_dim = hidden_dim_sam
             
             if l == num_layers_sam - 1:
-                out_dim = hidden_dim_sam if self.sam_view_dependent else feature_dim
+                out_dim = hidden_dim_sam if self.view_dependent else feature_dim
             else:
                 out_dim = hidden_dim_sam
 
@@ -97,7 +97,7 @@ class NeRFNetwork(NeRFSAMRenderer):
 
         self.sam_net = nn.ModuleList(sam_net)
 
-        if self.sam_view_dependent:
+        if self.view_dependent:
             self.num_layers_sam_dir = num_layers_sam_dir
             self.hidden_dim_sam_dir = hidden_dim_sam_dir
             self.encoder_sam_dir, self.in_dim_sam_dir = get_encoder(encoding_dir, num_levels=32, level_dim=8, 
@@ -306,7 +306,7 @@ class NeRFNetwork(NeRFSAMRenderer):
             {'params': self.encoder_sam.parameters(), 'lr': lr},
             {'params': self.sam_net.parameters(), 'lr': lr},
         ]
-        if self.sam_view_dependent:
+        if self.view_dependent:
             params.append({'params': self.encoder_sam_dir.parameters(), 'lr': lr})
             params.append({'params': self.sam_dir_net.parameters(), 'lr': lr})
         if self.bg_radius > 0:

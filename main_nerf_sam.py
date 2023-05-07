@@ -87,6 +87,8 @@ if __name__ == '__main__':
 
     opt = parser.parse_args()
 
+    torch.cuda.set_device(opt.gpu)
+
     if opt.O:
         opt.fp16 = True
         opt.cuda_ray = True
@@ -137,7 +139,7 @@ if __name__ == '__main__':
 
     criterion = torch.nn.MSELoss(reduction='none') 
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     Trainer_ = SAMTrainer if opt.train_sam else Trainer
     Dataset_ = NeRFSAMDataset if opt.train_sam else NeRFDataset
@@ -219,18 +221,18 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            valid_loader = Dataset_(opt, device=device, type='train', downscale=1, 
+            valid_loader = Dataset_(opt, device=device, type='val', downscale=1, 
                                     dataset_name=opt.dataset_name).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
 
             # also test
-            test_loader = Dataset_(opt, device=device, type='test', dataset_name=opt.dataset_name).dataloader()
+            test_loader = Dataset_(opt, device=device, type='test_all', dataset_name=opt.dataset_name).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
             
-            trainer.test(test_loader, write_video=True) # test and save video
+            trainer.test(test_loader, write_video=False) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)

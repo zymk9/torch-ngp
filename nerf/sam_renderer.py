@@ -588,8 +588,8 @@ class NeRFSAMRenderer(NeRFRenderer):
             results['t_depth'] = t_depth
             results['image'] = image
             results['sam_feature'] = sam_feature
-
         else:
-            print('yes')
+            # print('yes')
             results = _run(rays_o, rays_d, render_feature, **kwargs)
+
         return results
