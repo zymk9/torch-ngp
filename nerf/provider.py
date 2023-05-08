@@ -597,7 +597,7 @@ class NeRFSAMDataset:
         self.offset = opt.offset # camera offset
         self.bound = opt.bound # bounding box half length, also used as the radius to random sample poses.
         self.fp16 = opt.fp16 # if preload, load into fp16.
-        
+        self.online = opt.online # generate rgb and sam features online
 
         self.training = self.type in ['train', 'all', 'trainval']
         self.num_rays = self.opt.num_rays if self.training else -1
@@ -684,14 +684,18 @@ class NeRFSAMDataset:
                     self.poses.append(pose)
         else:
             self.poses = []
-            self.features = []
+            self.features = [] if not self.online else None
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
 
-                if not os.path.exists(f_path):
+                if not os.path.exists(f_path) and not self.online:
                     continue
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
+                self.poses.append(pose)
+
+                if self.online:
+                    continue
 
                 with np.load(f_path) as data:
                     self.encoder_img_size = data['encoder_img_size']
@@ -703,8 +707,6 @@ class NeRFSAMDataset:
                     f'feature dimension does not match.'
 
                 feature = torch.from_numpy(feature)
-
-                self.poses.append(pose)
                 self.features.append(feature)
             
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
@@ -720,7 +722,6 @@ class NeRFSAMDataset:
             self.error_map = torch.ones([self.features.shape[0], 128 * 128], dtype=torch.float) # [B, 128 * 128], flattened for easy indexing, fixed resolution...
         else:
             self.error_map = None
-
 
         if self.preload:
             self.poses = self.poses.to(self.device)
@@ -745,43 +746,56 @@ class NeRFSAMDataset:
     
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
-
     def collate(self, index):
 
         B = len(index) # a list of length 1
 
+        scale = 1.0
+        if self.online:
+            scale = max(self.H, self.W) / 64.0
+
         # random pose without gt images.
-        if self.rand_pose == 0 or index[0] >= len(self.poses):
+        # if self.rand_pose == 0 or index[0] >= len(self.poses):
 
-            poses = rand_poses(B, self.device, radius=self.radius)
+        #     poses = rand_poses(B, self.device, radius=self.radius)
 
-            # sample a low-resolution but full image for CLIP
-            s = np.sqrt(self.H * self.W / self.num_rays) # only in training, assert num_rays > 0
-            rH, rW = int(self.H / s), int(self.W / s)
-            rays = get_rays(poses, self.intrinsics / s, rH, rW, -1)
+        #     # sample a low-resolution but full image for CLIP
+        #     s = np.sqrt(self.H * self.W / self.num_rays) # only in training, assert num_rays > 0
+        #     rH, rW = int(self.H / s), int(self.W / s)
+        #     rays = get_rays(poses, self.intrinsics / s, rH, rW, -1)
 
-            return {
-                'H': rH,
-                'W': rW,
-                'rays_o': rays['rays_o'],
-                'rays_d': rays['rays_d'],    
-            }
+        #     return {
+        #         'H': rH,
+        #         'W': rW,
+        #         'rays_o': rays['rays_o'],
+        #         'rays_d': rays['rays_d'],    
+        #     }
+
+        H = int(np.floor(self.H / scale))
+        W = int(np.floor(self.W / scale))
+        intrinsics = self.intrinsics / scale
+        num_rays = -1 if self.online else self.num_rays # always use all rays in online mode
 
         poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
         
-        rays = get_rays(poses, self.intrinsics, self.H, self.W, self.num_rays, error_map, self.opt.patch_size)
+        rays = get_rays(poses, intrinsics, H, W, num_rays, error_map, self.opt.patch_size)
 
         results = {
-            'H': self.H,
-            'W': self.W,
+            'H': H,
+            'W': W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
         }
 
-        if self.features is not None:
+        if self.online:
+            rays_full = get_rays(poses, self.intrinsics, self.H, self.W, -1)
+            results['H_full'] = self.H
+            results['W_full'] = self.W
+            results['rays_full'] = rays_full
 
+        if self.features is not None and not self.online:
             # resize the features to fit the image size
             features = self.features[index].to(self.device) # [B, C, H, W]
             if self.downscale == 1:
@@ -789,8 +803,6 @@ class NeRFSAMDataset:
             features = torch.permute(features, (0, 2, 3, 1))  # [B, H, W, C]
             if self.downscale == 10:
                 features = features[:, :48, :64, :]
-
-            # a = features.view(B, -1, self.feature_dim)[0,rays['inds'][0]]
 
             if self.training:
                 features = torch.gather(features.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]

@@ -581,7 +581,7 @@ class NeRFSAMRenderer(NeRFRenderer):
             results['depth'] = depth
             results['image'] = image
             results['sam_feature'] = sam_feature
-
         else:
             results = _run(rays_o, rays_d, render_feature, **kwargs)
+
         return results

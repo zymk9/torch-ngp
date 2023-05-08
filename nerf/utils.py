@@ -1668,6 +1668,7 @@ class SAMTrainer(Trainer):
         ], 255).astype(np.uint8)
 
         self.feature_dim = self.model.feature_dim
+        self.sam_predictor = None
 
         # freeze rgb and density
         self.model.encoder.requires_grad_(False)
@@ -1676,6 +1677,9 @@ class SAMTrainer(Trainer):
         self.model.color_net.requires_grad_(False)
 
     ### ------------------------------
+
+    def set_sam_predictor(self, predictor):
+        self.sam_predictor = predictor
 
     def mask3d_loss(self, data):
         coords = data['mask3d_coords'] # [N, 3]
@@ -1714,12 +1718,58 @@ class SAMTrainer(Trainer):
 
         return smoothness_loss
 
+    def get_sam_features_online(self, data):
+        H_full, W_full = data['H_full'], data['W_full']
+        H, W = data['H'], data['W'] # feature size
+
+        rays_full = data['rays_full']
+        rays_full_o = rays_full['rays_o'] # [B, N, 3]
+        rays_full_d = rays_full['rays_d'] # [B, N, 3]
+        B, N, _ = rays_full_o.shape
+
+        is_training = self.model.training
+        cuda_ray = self.model.cuda_ray
+        self.model.cuda_ray = False # temporary fix
+        self.model.eval()
+
+        gt_features = []
+        with torch.no_grad():
+            img_outputs = self.model.render(rays_full_o, rays_full_d, render_feature=False, staged=True, 
+                                            perturb=False, force_all_rays=True, **vars(self.opt))
+            imgs = img_outputs['image'].reshape(-1, H_full, W_full, 3).detach().cpu().numpy()
+            imgs = (imgs * 255).astype(np.uint8) # [B, H_full, W_full, 3]
+
+            temp_dir = os.path.join(self.workspace, 'sam_imgs')
+            os.makedirs(temp_dir, exist_ok=True)
+
+            for i in range(imgs.shape[0]):
+                imageio.imsave(os.path.join(temp_dir, f'{i}.png'), imgs[i])
+                self.sam_predictor.set_image(imgs[i])
+                emb = self.sam_predictor.get_image_embedding().detach()
+                emb = emb[0, :, :H, :W].permute(1, 2, 0) # [H, W, feature_dim]
+                gt_features.append(emb)
+
+            torch.cuda.empty_cache()
+
+        gt_features = torch.stack(gt_features, dim=0).to(self.device) # [B, H, W, feature_dim]
+        data['features'] = gt_features
+
+        if is_training:
+            self.model.train()
+        self.model.cuda_ray = cuda_ray
+
+        return gt_features
+
     def train_step(self, data):
 
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
 
-        gt_features = data['features'] # [B, N], N=H*W?
+        if not self.opt.online:
+            gt_features = data['features'] # [B, N], N=H*W?
+        else:
+            gt_features = self.get_sam_features_online(data)
+            gt_features = gt_features.flatten(1, 2) # [B, N, feature_dim]
 
         B, N, _ = gt_features.shape
 
@@ -1790,7 +1840,12 @@ class SAMTrainer(Trainer):
 
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
-        gt_feature = data['features'] # [B, H, W, sam_dim]
+
+        if not self.opt.online:
+            gt_feature = data['features'] # [B, H, W, sam_dim]
+        else:
+            gt_feature = self.get_sam_features_online(data)
+
         B, H, W, _ = gt_feature.shape
 
         # eval with fixed background color

@@ -8,6 +8,8 @@ from nerf.utils import *
 from functools import partial
 from loss import huber_loss
 
+from segment_anything import sam_model_registry, SamPredictor
+
 import wandb
 
 torch.autograd.set_detect_anomaly(True)
@@ -72,7 +74,7 @@ if __name__ == '__main__':
     parser.add_argument('--mask3d_loss_weight', type=float, default=0.0, help="3d mask loss weight")
     parser.add_argument('--label_regularization_weight', type=float, default=0.0, help="label regularization weight")
     parser.add_argument('--feature_dim', type=int, default=256, help="dimension of features")
-
+    parser.add_argument('--online', action='store_true', help="online training")
 
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
     parser.add_argument('--dataset_name', type=str, default='default', choices=['3dfront', 'scannet', 'hypersim'], 
@@ -137,6 +139,11 @@ if __name__ == '__main__':
     Trainer_ = SAMTrainer if opt.train_sam else Trainer
     Dataset_ = NeRFSAMDataset if opt.train_sam else NeRFDataset
 
+    sam_predictor = None
+    if opt.online and opt.train_sam:
+        sam = sam_model_registry['vit_h'](checkpoint='/disk1/yichen/sam_vit_h_4b8939.pth').to(device)
+        sam_predictor = SamPredictor(sam)
+
     if opt.test:
         
         if not opt.train_sam:
@@ -160,7 +167,10 @@ if __name__ == '__main__':
         print(model)
 
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, 
-                           fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)                         
+                           fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)
+        
+        if opt.train_sam:
+            trainer.set_sam_predictor(sam_predictor)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer)
@@ -202,7 +212,10 @@ if __name__ == '__main__':
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
                            scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, 
-                           eval_interval=10, load_model_only=opt.load_model_only,)
+                           eval_interval=10, load_model_only=opt.load_model_only)
+        
+        if opt.train_sam:
+            trainer.set_sam_predictor(sam_predictor)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)
