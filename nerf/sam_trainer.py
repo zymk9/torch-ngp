@@ -110,6 +110,7 @@ class SAMTrainer(Trainer):
             gt_masks = torch.from_numpy(gt_masks).to(torch.float32).to(self.device)
 
         target_feature_size = self.predictor.model.image_encoder.img_size // self.predictor.model.image_encoder.patch_size
+        
         pred_features = postprocess_feature(pred_features, target_feature_size)
 
         self.predictor.set_torch_feature(pred_features)
@@ -128,6 +129,8 @@ class SAMTrainer(Trainer):
         nerf_masks = torch.stack(nerf_masks)
         loss = self.mask_criterion(nerf_masks, gt_masks)
         return loss
+    
+    
     def train_step(self, data):
         bg_color = None
         if 'feature' in data:
@@ -141,7 +144,7 @@ class SAMTrainer(Trainer):
                     rays_d = data['full_rays_d'] # [B, N, 3]
                     self.model.eval()
                     input = self.model.render(rays_o, rays_d, render_feature=False, staged=True, bg_color=bg_color, 
-                                                perturb=False, **vars(self.opt))
+                                                perturb=False, force_all_rays=True, use_cuda=False, **vars(self.opt))
                     input_im = input['image'].reshape(-1, data['full_H'], data['full_W'], 3)
                     input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
 
@@ -152,7 +155,7 @@ class SAMTrainer(Trainer):
                     gt_feature = preprocess_feature(gt_feature, data['H'], data['W'])
     
                 gt_feature = gt_feature.permute(0,2,3,1)
-            gt_feature = gt_feature.to(self.device)
+
         
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
@@ -160,13 +163,14 @@ class SAMTrainer(Trainer):
             "Need features for training"
 
         B, N, _ = rays_o.shape
+        rays_index = data['rays_index'][..., None]
+        rays_index = rays_index.expand(-1, -1, self.feature_dim)
+        gt_feature = torch.gather(gt_feature.view(B, -1, self.feature_dim), 1, rays_index) # [B, N]
+        gt_feature = gt_feature.to(self.device)
         self.model.train()
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
-                                    force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
-        # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True, force_all_rays=True, **vars(self.opt))
-
-        pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
- 
+                                    force_all_rays=True, **vars(self.opt))
+        pred_feature = outputs['sam_feature']
         loss = self.criterion(pred_feature, gt_feature).mean(-1) # [B, N, feature_dim] --> [B, N]
 
         # patch-based rendering
@@ -198,13 +202,9 @@ class SAMTrainer(Trainer):
             loss = loss + self.label_regularization(outputs['depth'], pred_feature) * self.opt.label_regularization_weight
         
         if self.opt.mask_loss_weight > 0:
-            loss = loss + self.mask_loss(pred_feature, data['full_H'], data['full_W'])
+            pred_feature = pred_feature.reshape(B, data['H'], data['W'], -1)
+            loss = loss + self.mask_loss(pred_feature, data['full_H'], data['full_W']) * self.opt.mask_loss_weight
         
-        # extra loss
-        # pred_weights_sum = outputs['weights_sum'] + 1e-8
-        # loss_ws = - 1e-1 * pred_weights_sum * torch.log(pred_weights_sum) # entropy to encourage weights_sum to be 0 or 1.
-        # loss = loss + loss_ws.mean()
-
         # 3d mask constraints
         if self.opt.mask3d_loss_weight > 0:
             mask3d_loss = self.mask3d_loss(data)
@@ -286,9 +286,7 @@ class SAMTrainer(Trainer):
                                     bg_color=bg_color, perturb=perturb, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)               
-        pred_rgb = (pred_rgb[0].detach().cpu().numpy() * 255).astype(np.uint8)
-        cv2.imwrite('test.png', cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR))
-        exit()
+
         pred_depth = outputs['depth'].reshape(-1, H, W)
         pred_t_depth = outputs['t_depth'].reshape(-1, H, W)
         return pred_rgb, pred_depth, pred_t_depth, pred_feature

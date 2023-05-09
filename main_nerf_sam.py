@@ -149,7 +149,7 @@ if __name__ == '__main__':
         else:
             metrics.append(MSEMeter())
 
-        test_loader = Dataset_(opt, device=device, type='train', n_test_per_pose=10, feature_dim=opt.feature_dim, dataset_name=opt.dataset_name).dataloader()
+        test_loader = Dataset_(opt, device=device, type='test', n_test_per_pose=10, feature_dim=opt.feature_dim, dataset_name=opt.dataset_name).dataloader()
         feature_dim = test_loader._data.feature_dim if opt.train_sam else None
 
         model = NeRFNetwork(
@@ -218,7 +218,7 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            valid_loader = Dataset_(opt, device=device, type='train', downscale=1, dataset_name=opt.dataset_name).dataloader()
+            valid_loader = Dataset_(opt, device=device, type='val', downscale=1, dataset_name=opt.dataset_name).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)

@@ -31,7 +31,7 @@ class NeRFSAMDataset:
         self.augmentation = opt.augmentation
 
         self.training = self.type in ['train', 'all', 'trainval']
-        self.num_rays = self.opt.num_rays if self.training else -1
+        self.num_rays = self.opt.num_rays if self.training and not self.opt.cuda_ray else -1
 
         self.rand_pose = opt.rand_pose
         self.mask3d = opt.mask3d if self.training or self.type == 'val' else None
@@ -140,7 +140,7 @@ class NeRFSAMDataset:
                     self.features = []
                 else:
                     self.images = []
-            for f in tqdm.tqdm(frames[:2], desc=f'Loading {type} data'):
+            for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
 
                 if not os.path.exists(f_path) :
@@ -267,7 +267,7 @@ class NeRFSAMDataset:
             intrinsics = np.floor(self.intrinsics / scale)
             H = int(np.floor(self.H / scale))
             W = int(np.floor(self.W / scale))
-            rays = get_rays(poses, intrinsics, H, W, -1, error_map, self.opt.patch_size)
+            rays = get_rays(poses, intrinsics, H, W, self.num_rays, error_map, self.opt.patch_size)
             full_rays = get_rays(poses, self.intrinsics, self.H, self.W, -1, error_map, self.opt.patch_size)
 
             results = {
@@ -275,7 +275,7 @@ class NeRFSAMDataset:
                 'W': W,
                 'rays_o': rays['rays_o'],
                 'rays_d': rays['rays_d'],
-                # 'index': rays['inds'],
+                'rays_index': rays['inds'],
                 'full_H': self.H,
                 'full_W': self.W,
                 'full_rays_o': full_rays['rays_o'],
@@ -293,7 +293,7 @@ class NeRFSAMDataset:
         intrinsics = np.floor(self.intrinsics / scale)
         H = int(np.floor(self.H / scale))
         W = int(np.floor(self.W / scale))
-        rays = get_rays(poses, intrinsics, H, W, -1, error_map, self.opt.patch_size)
+        rays = get_rays(poses, intrinsics, H, W, self.num_rays, error_map, self.opt.patch_size)
         full_rays = get_rays(poses, self.intrinsics, self.H, self.W, -1, error_map, self.opt.patch_size)
 
         results = {
@@ -301,7 +301,7 @@ class NeRFSAMDataset:
             'W': W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
-            # 'index': rays['inds'],
+            'rays_index': rays['inds'],
             'full_H': self.H,
             'full_W': self.W,
             'full_rays_o': full_rays['rays_o'],
