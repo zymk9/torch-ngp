@@ -3,6 +3,7 @@ import os
 import tqdm
 import imageio
 import json
+import wandb
 
 import numpy as np
 
@@ -164,12 +165,13 @@ class SAMTrainer(Trainer):
 
         return masks, iou_preds, low_res_masks
             
-    def mask_loss(self, pred_features, H, W, points_per_batch=64):
+    def mask_loss(self, image, pred_features, H, W, points_per_batch=64):
         input_point, input_label = self.generate_prompt(H, W)
         num_batches = int(np.ceil(input_point.size(0) / points_per_batch))
 
         with torch.no_grad():
             gt_masks = []
+            self.predictor.set_image(image)
             for i in range(num_batches):
                 masks, _, _ = self.sam_batch_predict(
                     input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), H, W
@@ -230,6 +232,7 @@ class SAMTrainer(Trainer):
 
         gt_features = torch.stack(gt_features, dim=0).to(self.device) # [B, H, W, feature_dim]
         data['feature'] = gt_features
+        data['images'] = imgs
 
         if is_training:
             self.model.train()
@@ -298,7 +301,13 @@ class SAMTrainer(Trainer):
             loss = loss + self.label_regularization(outputs['depth'], pred_feature) * self.opt.label_regularization_weight
         
         if self.opt.mask_loss_weight > 0:
-            loss = loss + self.mask_loss(pred_feature, data['full_H'], data['full_W'])
+            mask_loss = self.mask_loss(data['images'][0], pred_feature, data['full_H'], data['full_W'])
+            mask_loss *= self.opt.mask_loss_weight
+            loss = loss + mask_loss
+            if self.opt.wandb:
+                wandb.log({
+                    'mask_loss': mask_loss.item()
+                }, commit=False)
         
         # extra loss
         # pred_weights_sum = outputs['weights_sum'] + 1e-8

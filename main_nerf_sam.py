@@ -94,7 +94,7 @@ if __name__ == '__main__':
     torch.cuda.set_device(opt.gpu)
 
     if opt.O:
-        opt.fp16 = True
+        opt.fp16 = False
         opt.cuda_ray = True
         opt.preload = True
     
