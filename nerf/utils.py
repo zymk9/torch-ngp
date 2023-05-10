@@ -593,13 +593,13 @@ class Trainer(object):
 
         # wandb
         if opt.wandb:
-            if opt.train_mask:
-                project_name = f'torch-ngp_mask_{opt.dataset_name}' 
+            if opt.train_sam:
+                project_name = f'torch-ngp_sam_{opt.dataset_name}' 
             else:
                 project_name = f'torch-ngp_{opt.dataset_name}'
                     
-            wandb.init(project=project_name, entity='nerf-rpn-2022', name=opt.workspace.split('/')[-1])
-            wandb.config = deepcopy(opt)
+            wandb.init(project=project_name, entity='nerf-rpn-2022', name=opt.workspace.split('/')[-1],
+                       config=deepcopy(vars(opt)))
 
     def __del__(self):
         if self.log_ptr is not None: 

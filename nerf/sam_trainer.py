@@ -2,6 +2,7 @@
 import os
 import tqdm
 import imageio
+import json
 
 import numpy as np
 
@@ -11,11 +12,31 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
+
 from .utils import Trainer, preprocess_feature, postprocess_feature, print_shape, get_rays, linear_to_srgb
-import json
+
+
+class Cache:
+    def __init__(self, size=100):
+        self.size = size
+        self.data = {}
+        self.key = 0
+    
+    def full(self):
+        return len(self.data) == self.size
+
+    def insert(self, x):
+        self.data[self.key] = x
+        self.key = (self.key + 1) % self.size
+    
+    def get(self, key=None):
+        if key is None:
+            key = np.random.randint(0, len(self.data))
+        return self.data[key]
+    
 
 class SAMTrainer(Trainer):
-    def __init__(self, *args, feature_size=64, load_feature = True, predictor = None, **kwargs):
+    def __init__(self, *args, feature_size=64, predictor = None, **kwargs):
         super().__init__(*args, **kwargs)
 
         # TODO: overflow issue, currently just use the same color map as gt visualization
@@ -26,32 +47,35 @@ class SAMTrainer(Trainer):
         self.feature_dim = self.model.feature_dim
         self.feature_size = feature_size
         self.predictor = predictor
+
         if self.opt.mask_loss_weight > 0:
             self.mask_criterion = torch.nn.BCEWithLogitsLoss()
+
         if predictor is not None:
             self.predictor.model.to(self.device)
-        self.load_feature = load_feature
+
         # freeze rgb and density
         self.model.encoder.requires_grad_(False)
         self.model.sigma_net.requires_grad_(False)
         self.model.encoder_dir.requires_grad_(False)
         self.model.color_net.requires_grad_(False)
 
+        self.cache = Cache(self.opt.cache_size)
+
     ### ------------------------------
+
     def postprocess(self, features):
         target_feature_size = self.feature_size
         f_h, f_w = features.shape[1:]
         max_length = max(f_h, f_w)
-        h,w = int(np.floor(target_feature_size * f_h / max_length)), int(np.floor(target_feature_size * f_w / max_length))
-        features = cv2.resize(features.transpose(1,2,0), (w,h), interpolation = cv2.INTER_LINEAR  )
-        features = features.transpose(2,0,1)
-        features = torch.from_numpy(features[None,...])
+        h, w = int(np.floor(target_feature_size * f_h / max_length)), int(np.floor(target_feature_size * f_w / max_length))
+        features = cv2.resize(features.transpose(1, 2, 0), (w, h), interpolation=cv2.INTER_LINEAR)
+        features = features.transpose(2, 0, 1)
+        features = torch.from_numpy(features[None, ...])
         
         padh = target_feature_size - h
         padw = target_feature_size - w
         return F.pad(features, (0, padw, 0, padh)).numpy()[0]
-
-
 
     def label_regularization(self, depth, pred_masks):
         '''
@@ -78,99 +102,179 @@ class SAMTrainer(Trainer):
 
         return smoothness_loss
 
-    def generate_prompt(self, H, W):
+    def generate_prompt(self, H, W, padding=30):
         if self.opt.prompt_sample == 'uniform':
-            y = torch.linspace(0, H, steps=self.opt.sample_step)
-            x = torch.linspace(0, W, steps=self.opt.sample_step)
+            y = torch.linspace(padding, H - padding, steps=self.opt.sample_step)
+            x = torch.linspace(padding, W - padding, steps=self.opt.sample_step)
             
             grid_x, grid_y = torch.meshgrid(x, y, indexing='ij')
             input_point = torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], -1)
             input_label = torch.ones(input_point.shape[0])
-            return input_point, input_label
+
         elif self.opt.prompt_sample == 'random':
-            y = torch.randint(0, H, (self.opt.sample_step**2,))
-            x = torch.randint(0, W, (self.opt.sample_step**2,))
+            y = torch.randint(padding, H - padding, (self.opt.sample_step**2,))
+            x = torch.randint(padding, W - padding, (self.opt.sample_step**2,))
             
-            pass
-            
+            input_point = torch.stack([x, y], -1)
+            input_label = torch.ones(input_point.shape[0])
+
+        return input_point, input_label
+
+    def sam_forward(self, point_coords, point_labels, features, H, W):
+        predictor = self.predictor
+        sam = self.predictor.model
+
+        point_coords = predictor.transform.apply_coords(point_coords, (H, W))
+        coords_torch = torch.as_tensor(point_coords, dtype=torch.float, device=predictor.device)
+        labels_torch = torch.as_tensor(point_labels, dtype=torch.int, device=predictor.device)
+        coords_torch, labels_torch = coords_torch[:, None, :], labels_torch[:, None]
+        points = (coords_torch, labels_torch)
+
+        # Embed prompts
+        sparse_embeddings, dense_embeddings = sam.prompt_encoder(
+            points=points,
+            boxes=None,
+            masks=None,
+        )
+
+        # Predict masks
+        low_res_masks, iou_predictions = sam.mask_decoder(
+            image_embeddings=features,
+            image_pe=sam.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=True,
+        )
+
+        # Upscale the masks to the original image resolution
+        masks = sam.postprocess_masks(low_res_masks, predictor.input_size, predictor.original_size)
+
+        return masks, iou_predictions, low_res_masks
     
-    def mask_loss(self, pred_features, H, W):
+    def sam_batch_predict(self, points, H, W):
+        transformed_points = self.predictor.transform.apply_coords(points, (H, W))
+        in_points = torch.as_tensor(transformed_points, device=self.predictor.device)
+        in_labels = torch.ones(in_points.shape[0], dtype=torch.int, device=in_points.device)
+        masks, iou_preds, low_res_masks = self.predictor.predict_torch(
+            in_points[:, None, :],
+            in_labels[:, None],
+            multimask_output=True,
+            return_logits=False,
+        )
+
+        return masks, iou_preds, low_res_masks
+            
+    def mask_loss(self, pred_features, H, W, points_per_batch=64):
         input_point, input_label = self.generate_prompt(H, W)
+        num_batches = int(np.ceil(input_point.size(0) / points_per_batch))
+
         with torch.no_grad():
             gt_masks = []
-            for i in range(input_point.size(0)):
-                masks, scores, logits = self.predictor.predict(
-                    point_coords=input_point[i:i+1, :].numpy(),
-                    point_labels=input_label[i:i+1].numpy(),
-                    multimask_output=True,
-                )
 
-                gt_masks.append(masks[0].reshape(-1))
-            gt_masks = np.stack(gt_masks)
-            gt_masks = torch.from_numpy(gt_masks).to(torch.float32).to(self.device)
+            for i in range(num_batches):
+                masks, _, _ = self.sam_batch_predict(
+                    input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), H, W
+                )   # [B, 3, H, W]
 
-        target_feature_size = self.predictor.model.image_encoder.img_size // self.predictor.model.image_encoder.patch_size
-        
-        pred_features = postprocess_feature(pred_features, target_feature_size)
+                gt_masks.append(masks[:, -1].flatten(1))  # use the last level mask
 
-        self.predictor.set_torch_feature(pred_features)
-        input_point = input_point.to(self.device)
-        input_label = input_label.to(self.device)
+            gt_masks = torch.cat(gt_masks, dim=0).to(torch.float32)
+
+        pred_features = postprocess_feature(pred_features, 64)
         nerf_masks = []
-        for i in range(input_point.size(0)):
-            pred_masks, pred_scores, pred_logits = self.predictor.predict_torch(
-                    point_coords=input_point[i:i+1, :][None, ...],
-                    point_labels=input_label[i:i+1][None, ...],
-                    return_logits=True
-                )
+        for i in range(num_batches):
+            pred_masks, _, _ = self.sam_forward(
+                input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), 
+                input_label[i*points_per_batch:(i+1)*points_per_batch].numpy(), 
+                pred_features, H, W
+            )
 
-            nerf_masks.append(pred_masks[0][0].reshape(-1))     
+            nerf_masks.append(pred_masks[:, -1].flatten(1))
 
-        nerf_masks = torch.stack(nerf_masks)
+        nerf_masks = torch.cat(nerf_masks, dim=0)
         loss = self.mask_criterion(nerf_masks, gt_masks)
         return loss
     
+    def get_sam_features_online(self, data):
+        H_full, W_full = data['full_H'], data['full_W']
+        H, W = data['H'], data['W'] # feature size
+
+        rays_full_o = data['full_rays_o'] # [B, N, 3]
+        rays_full_d = data['full_rays_d'] # [B, N, 3]
+
+        is_training = self.model.training
+        cuda_ray = self.model.cuda_ray
+        self.model.cuda_ray = False # temporary fix
+        self.model.eval()
+
+        gt_features = []
+        with torch.no_grad():
+            img_outputs = self.model.render(rays_full_o, rays_full_d, render_feature=False, staged=True, 
+                                            perturb=False, force_all_rays=True, **vars(self.opt))
+            imgs = img_outputs['image'].reshape(-1, H_full, W_full, 3).detach().cpu().numpy()
+            imgs = (imgs * 255).astype(np.uint8) # [B, H_full, W_full, 3]
+
+            # temp_dir = os.path.join(self.workspace, 'sam_imgs')
+            # os.makedirs(temp_dir, exist_ok=True)
+
+            for i in range(imgs.shape[0]):
+                # imageio.imsave(os.path.join(temp_dir, f'{i}.png'), imgs[i])
+                self.predictor.set_image(imgs[i])
+                emb = self.predictor.get_image_embedding().detach()
+                if emb.shape[-2] != H or emb.shape[-1] != W:
+                    emb = preprocess_feature(emb, H, W)
+
+                emb = emb[0].permute(1, 2, 0) # [H, W, feature_dim]
+                gt_features.append(emb)
+
+            torch.cuda.empty_cache()
+
+        gt_features = torch.stack(gt_features, dim=0).to(self.device) # [B, H, W, feature_dim]
+        data['feature'] = gt_features
+
+        if is_training:
+            self.model.train()
+        self.model.cuda_ray = cuda_ray
+
+        return gt_features
+
     
     def train_step(self, data):
         bg_color = None
+
+        use_cache = self.opt.cache_size > 0 and len(self.cache.data) > 0 and \
+                    self.global_step % self.opt.cache_freq != 0
+        if use_cache:
+            data = self.cache.get()
+
+        assert 'feature' in data or self.predictor is not None , \
+            "Need features for training"
+        
         if 'feature' in data:
             gt_feature = data['feature'] 
         else:
-            with torch.no_grad():
-                if 'image' in data:
-                    input_im = data['image']
-                else:
-                    rays_o = data['full_rays_o'] # [B, N, 3]
-                    rays_d = data['full_rays_d'] # [B, N, 3]
-                    self.model.eval()
-                    input = self.model.render(rays_o, rays_d, render_feature=False, staged=True, bg_color=bg_color, 
-                                                perturb=False, force_all_rays=True, use_cuda=False, **vars(self.opt))
-                    input_im = input['image'].reshape(-1, data['full_H'], data['full_W'], 3)
-                    input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
+            gt_feature = self.get_sam_features_online(data)
 
-                self.predictor.set_image(input_im)
-                gt_feature = self.predictor.get_image_embedding().detach()
-                
-                if gt_feature.shape[0] != data['H'] or gt_feature.shape[1] != data['W']:
-                    gt_feature = preprocess_feature(gt_feature, data['H'], data['W'])
-    
-                gt_feature = gt_feature.permute(0,2,3,1)
-
+        if not use_cache:
+            self.cache.insert(data)
         
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
-        assert 'feature' in data or self.predictor is not None , \
-            "Need features for training"
-
         B, N, _ = rays_o.shape
-        rays_index = data['rays_index'][..., None]
-        rays_index = rays_index.expand(-1, -1, self.feature_dim)
-        gt_feature = torch.gather(gt_feature.view(B, -1, self.feature_dim), 1, rays_index) # [B, N]
-        gt_feature = gt_feature.to(self.device)
+
+        # rays_index = data['rays_index'][..., None]
+        # rays_index = rays_index.expand(-1, -1, self.feature_dim)
+        # gt_feature = torch.gather(gt_feature.view(B, -1, self.feature_dim), 1, rays_index) # [B, N]
+        # gt_feature = gt_feature.to(self.device)
+
         self.model.train()
+
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
-                                    force_all_rays=True, **vars(self.opt))
-        pred_feature = outputs['sam_feature']
+                                    force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
+
+        pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
+        # pred_feature = outputs['sam_feature']
+        
         loss = self.criterion(pred_feature, gt_feature).mean(-1) # [B, N, feature_dim] --> [B, N]
 
         # patch-based rendering
@@ -234,23 +338,7 @@ class SAMTrainer(Trainer):
         if 'feature' in data:
             gt_feature = data['feature'] 
         else:
-            with torch.no_grad():
-                if 'image' in data:
-                    input_im = data['image']
-                else:
-                    input = self.model.render(data['full_rays_o'], data['full_rays_d'], render_feature=False, staged=True, bg_color=bg_color, 
-                                                perturb=True, **vars(self.opt))
-                    input_im = input['image'].reshape(-1, data['full_H'], data['full_W'], 3)
-                    input_im = (input_im[0].detach().cpu().numpy() * 255).astype(np.uint8)
-                    
-                self.predictor.set_image(input_im)
-                gt_feature = self.predictor.get_image_embedding()
-                
-                if gt_feature.shape[0] != data['H'] or gt_feature.shape[1] != data['W']:
-                    gt_feature = preprocess_feature(gt_feature, data['H'], data['W'])
-                gt_feature = gt_feature.permute(0,2,3,1)
-                
-                
+            gt_feature = self.get_sam_features_online(data)
                 
         loss = self.criterion(pred_feature, gt_feature).mean()
 
@@ -260,7 +348,6 @@ class SAMTrainer(Trainer):
         if self.opt.mask3d_loss_weight > 0:
             mask3d_loss = self.mask3d_loss(data)
             loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
-
 
         return pred_rgb, pred_depth, pred_feature, gt_feature, loss
     
@@ -341,31 +428,22 @@ class SAMTrainer(Trainer):
                 else:
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
                     
-                    depth_shape = pred_t_depth.shape
-                    pred_t_depth = pred_t_depth.reshape(-1).astype(np.float32)
-                    np.savez(os.path.join(save_path, f'{name}_{i:04d}_depth.npz'), size=depth_shape, depth=pred_t_depth)
+                    np.save(os.path.join(save_path, f'{name}_{i:04d}_depth.npy'), pred_t_depth)
                     
-                    pred_feature = pred_feature.transpose(2,0,1)
-                    pred_feature = self.postprocess(pred_feature)
-                    res = np.array(pred_feature.shape)
-                    pred_feature = pred_feature.reshape(-1).astype(np.float32)
-                    np.savez(os.path.join(save_path, f'{name}_{i:04d}_feature.npz'), res=res, embedding=pred_feature)
-
+                    # pred_feature = pred_feature.transpose(2,0,1)
+                    # pred_feature = self.postprocess(pred_feature)
+                    np.save(os.path.join(save_path, f'{name}_{i:04d}_feature.npy'), pred_feature)
                     
                 pbar.update(loader.batch_size)
         
         if write_video:
             os.makedirs(os.path.join(save_path, 'frames'), exist_ok=True)
             for i, (r,d,f) in tqdm.tqdm(enumerate(zip(all_preds, all_preds_t_depth, all_preds_feature))):
-                f = f.transpose(2,0,1)
-                f = self.postprocess(f)
-                res = np.array(f.shape)
-                f = f.reshape(-1).astype(np.float32)
-                np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_feature.npz'), res=res, embedding=f)
+                # f = f.transpose(2,0,1)
+                # f = self.postprocess(f)
+                np.save(os.path.join(save_path, 'frames', f'{name}_{i:04d}_feature.npy'), f)
                 cv2.imwrite(os.path.join(save_path, 'frames', f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(r, cv2.COLOR_RGB2BGR))
-                depth_shape = d.shape
-                d = d.reshape(-1).astype(np.float32)
-                np.savez(os.path.join(save_path, 'frames', f'{name}_{i:04d}_depth.npz'), size=depth_shape, depth=d)
+                np.save(os.path.join(save_path, 'frames', f'{name}_{i:04d}_depth.npy'), d)
                     
             all_poses = {'poses': all_poses} 
             all_poses = json.dumps(all_poses, indent=4)
@@ -378,9 +456,7 @@ class SAMTrainer(Trainer):
             all_preds_depth = np.stack(all_preds_depth, axis=0)
             imageio.mimwrite(os.path.join(save_path, f'{name}_rgb.mp4'), all_preds, fps=25, quality=8, macro_block_size=1)
             imageio.mimwrite(os.path.join(save_path, f'{name}_depth.mp4'), all_preds_depth, fps=25, quality=8, macro_block_size=1)
-
-                
-                
+       
         self.log(f"==> Finished Test.")
 
     # [GUI] test on a single image
@@ -549,4 +625,3 @@ class SAMTrainer(Trainer):
             self.ema.restore()
 
         self.log(f"++> Evaluate epoch {self.epoch} Finished.")
-      

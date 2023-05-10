@@ -17,14 +17,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "composite_rays_with_masks_train_forward (CUDA)");
     m.def("composite_rays_with_masks_train_backward", &composite_rays_with_masks_train_backward, 
           "composite_rays_with_masks_train_backward (CUDA)");
-    m.def("composite_rays_with_features_train_forward", &composite_rays_with_features_train_forward, 
-          "composite_rays_with_features_train_forward (CUDA)");
-    m.def("composite_rays_with_features_train_backward", &composite_rays_with_features_train_backward, 
-          "composite_rays_with_features_train_backward (CUDA)");
     // infer
     m.def("march_rays", &march_rays, "march rays (CUDA)");
     m.def("composite_rays", &composite_rays, "composite rays (CUDA)");
     m.def("composite_rays_with_masks", &composite_rays_with_masks, "composite rays with masks (CUDA)");
-    m.def("composite_rays_with_features", &composite_rays_with_features, "composite rays with features (CUDA)");
-
 }

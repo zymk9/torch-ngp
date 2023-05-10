@@ -23,7 +23,7 @@ class NeRFNetwork(NeRFSAMRenderer):
                  hidden_dim_sam=256,
                  num_layers_sam_dir=3,
                  hidden_dim_sam_dir=256,
-                 feature_dim=256,       # including background
+                 feature_dim=256,       # sam embedding dim (256)
                  bound=1,
                  view_dependent=True,
                  **kwargs,
@@ -77,10 +77,10 @@ class NeRFNetwork(NeRFSAMRenderer):
         # sam feature network
         self.num_layers_sam = num_layers_sam
         self.hidden_dim_sam = hidden_dim_sam
-        self.encoder_sam, self.in_dim_sam = get_encoder(encoding, num_levels=32, level_dim=8, 
-                                                        log2_hashmap_size=21,
-                                                        desired_resolution=2048 * bound)
-        
+        self.encoder_sam, self.in_dim_sam = get_encoder(encoding, num_levels=16, level_dim=8, 
+                                                        log2_hashmap_size=19,
+                                                        desired_resolution=512)
+
         sam_net = []
         for l in range(num_layers_sam):
             if l == 0:
@@ -89,23 +89,23 @@ class NeRFNetwork(NeRFSAMRenderer):
                 in_dim = hidden_dim_sam
             
             if l == num_layers_sam - 1:
-                if self.view_dependent:
-                    out_dim = hidden_dim_sam
-                else:
-                    out_dim = feature_dim
+                out_dim = hidden_dim_sam if self.view_dependent else feature_dim
             else:
                 out_dim = hidden_dim_sam
 
-            sam_net.append(nn.Linear(in_dim, out_dim, bias=False))
+            sam_net.append(nn.Linear(in_dim, out_dim, bias=True))
 
         self.sam_net = nn.ModuleList(sam_net)
+        self.norm_sam = nn.LayerNorm(hidden_dim_sam if self.view_dependent else feature_dim)
 
-        self.num_layers_sam_dir = num_layers_sam_dir        
-        self.hidden_dim_sam_dir = hidden_dim_sam_dir
-        self.encoder_sam_dir, self.in_dim_sam_dir = get_encoder(encoding_dir)
-        
         if self.view_dependent:
-            sam_dir_net =  []
+            self.num_layers_sam_dir = num_layers_sam_dir
+            self.hidden_dim_sam_dir = hidden_dim_sam_dir
+            self.encoder_sam_dir, self.in_dim_sam_dir = get_encoder(encoding_dir, num_levels=16, level_dim=8, 
+                                                                    log2_hashmap_size=19,
+                                                                    desired_resolution=512)
+        
+            sam_dir_net = []
             for l in range(num_layers_sam_dir):
                 if l == 0:
                     in_dim = self.in_dim_sam_dir + self.hidden_dim_sam
@@ -113,14 +113,14 @@ class NeRFNetwork(NeRFSAMRenderer):
                     in_dim = hidden_dim_sam_dir
                 
                 if l == num_layers_sam_dir - 1:
-                    out_dim = feature_dim # 3 rgb
+                    out_dim = feature_dim
                 else:
                     out_dim = hidden_dim_sam_dir
-                
-                sam_dir_net.append(nn.Linear(in_dim, out_dim, bias=False))
+
+                sam_dir_net.append(nn.Linear(in_dim, out_dim, bias=True))
 
             self.sam_dir_net = nn.ModuleList(sam_dir_net)
-
+            self.norm_sam_dir = nn.LayerNorm(feature_dim)
 
         # background network
         if self.bg_radius > 0:
@@ -180,11 +180,12 @@ class NeRFNetwork(NeRFSAMRenderer):
         for l in range(self.num_layers_sam):
             s_sam = self.sam_net[l](s_sam)
             if l != self.num_layers_sam - 1:
-                s_sam = F.relu(s_sam, inplace=True)                
+                s_sam = F.relu(s_sam, inplace=True)
+        s_sam = self.norm_sam(s_sam)
         sam_f = s_sam
                 
         if self.view_dependent:
-            s_sam = F.relu(s_sam, inplace=True)         
+            # s_sam = F.relu(s_sam, inplace=True)
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
 
@@ -192,6 +193,7 @@ class NeRFNetwork(NeRFSAMRenderer):
                 h_sam = self.sam_dir_net[l](h_sam)
                 if l != self.num_layers_sam_dir - 1:
                     h_sam = F.relu(h_sam, inplace=True)
+            h_sam = self.norm_sam_dir(h_sam)
             sam_f = h_sam
             
         return sigma, color, sam_f
@@ -266,37 +268,36 @@ class NeRFNetwork(NeRFSAMRenderer):
         # x: [N, 3] in [-bound, bound]
         # mask: [N,], bool, indicates where we actually needs to compute rgb.
         if mask is not None:
-            sam_f = torch.zeros(mask.shape[0], 3, dtype=x.dtype, device=x.device) # [N, 3]
+            output = torch.zeros(mask.shape[0], 3, dtype=x.dtype, device=x.device) # [N, 3]
             # in case of empty mask
             if not mask.any():
-                return sam_f
+                return output
             x = x[mask]
             d = d[mask]
-            geo_feat = geo_feat[mask]
+
         s_sam = self.encoder_sam(x, bound=self.bound)
         for l in range(self.num_layers_sam):
             s_sam = self.sam_net[l](s_sam)
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)                
-        output = s_sam
+        sam_f = s_sam
                 
         if self.view_dependent:
             s_sam = F.relu(s_sam, inplace=True)         
             d_sam = self.encoder_sam_dir(d)
             h_sam = torch.cat([d_sam, s_sam], dim=-1)
-
             for l in range(self.num_layers_sam_dir):
                 h_sam = self.sam_dir_net[l](h_sam)
                 if l != self.num_layers_sam_dir - 1:
                     h_sam = F.relu(h_sam, inplace=True)
-            output = h_sam
+            sam_f = h_sam
             
         if mask is not None:
-            sam_f[mask] = output.to(sam_f.dtype) # fp16 --> fp32
+            output[mask] = sam_f.to(output.dtype) # fp16 --> fp32
         else:
-            sam_f = output
+            output = sam_f
             
-        return sam_f
+        return output
 
     # optimizer utils
     def get_params(self, lr):

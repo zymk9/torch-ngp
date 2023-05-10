@@ -67,7 +67,7 @@ class NeRFSAMRenderer(NeRFRenderer):
                  min_near=0.2,
                  density_thresh=0.01,
                  bg_radius=-1,
-                 feature_dim=2,
+                 feature_dim=256,
                  ):
         super().__init__(bound, cuda_ray, density_scale, min_near, density_thresh, bg_radius)
 
@@ -83,7 +83,7 @@ class NeRFSAMRenderer(NeRFRenderer):
     def color(self, x, d, mask=None, **kwargs):
         raise NotImplementedError()
 
-    def mask(self, x, mask=None, **kwargs):
+    def sam(self, x, d, mask=None, **kwargs):
         raise NotImplementedError()
 
     def run(self, rays_o, rays_d, render_feature, num_steps=128, upsample_steps=128, bg_color=None, perturb=False, **kwargs):
@@ -284,6 +284,7 @@ class NeRFSAMRenderer(NeRFRenderer):
                 weights_sum, depth, image, feature_map = raymarching.composite_rays_with_masks_train(
                     sigmas, rgbs, sam_fs, deltas, rays, T_thresh
                 )
+            t_depth = depth
             image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
             depth = torch.clamp(depth - nears, min=0) / (fars - nears)
             image = image.view(*prefix, 3)
@@ -522,11 +523,11 @@ class NeRFSAMRenderer(NeRFRenderer):
         #print(f'[density grid] min={self.density_grid.min().item():.4f}, max={self.density_grid.max().item():.4f}, mean={self.mean_density:.4f}, occ_rate={(self.density_grid > 0.01).sum() / (128**3 * self.cascade):.3f} | [step counter] mean={self.mean_count}')
 
 
-    def render(self, rays_o, rays_d, staged=False, max_ray_batch=4096, render_feature=False, use_cuda=True, **kwargs):
+    def render(self, rays_o, rays_d, staged=False, max_ray_batch=4096, render_feature=False, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # render_feature: bool, whether to render the instance mask
         # return: pred_rgb: [B, N, 3]
-        if self.cuda_ray and use_cuda:
+        if self.cuda_ray:
             _run = self.run_cuda
         else:
             _run = self.run
@@ -535,7 +536,7 @@ class NeRFSAMRenderer(NeRFRenderer):
         device = rays_o.device
 
         # never stage when cuda_ray
-        if staged and not (self.cuda_ray and use_cuda):
+        if staged and not self.cuda_ray :
             depth = torch.empty((B, N), device=device)
             t_depth = torch.empty((B, N), device=device)
             image = torch.empty((B, N, 3), device=device)
@@ -558,7 +559,7 @@ class NeRFSAMRenderer(NeRFRenderer):
             results['t_depth'] = t_depth
             results['image'] = image
             results['sam_feature'] = sam_feature
-
         else:
             results = _run(rays_o, rays_d, render_feature, **kwargs)
+
         return results

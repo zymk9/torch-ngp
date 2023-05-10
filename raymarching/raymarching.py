@@ -472,30 +472,3 @@ class _composite_rays_with_masks(Function):
 
 
 composite_rays_with_masks = _composite_rays_with_masks.apply
-
-# class _composite_rays_with_features(Function):
-#     @staticmethod
-#     @custom_fwd(cast_inputs=torch.float32) # need to cast sigmas & rgbs to float
-#     def forward(ctx, n_alive, n_step, feature_dim, rays_alive, rays_t, sigmas, rgbs, sam_fs, deltas, weights_sum, depth, image, mask_out, T_thresh=1e-2):
-#         ''' composite rays' rgbs, according to the ray marching formula. (for inference)
-#         Args:
-#             n_alive: int, number of alive rays
-#             n_step: int, how many steps we march
-#             feature_dim: int, feature dimension
-#             rays_alive: int, [n_alive], the alive rays' IDs in N (N >= n_alive)
-#             rays_t: float, [N], the alive rays' time
-#             sigmas: float, [n_alive * n_step,]
-#             rgbs: float, [n_alive * n_step, 3]
-#             masks: float, [n_alive * n_step, n_instance]
-#             deltas: float, [n_alive * n_step, 2], all generated points' deltas (here we record two deltas, the first is for RGB, the second for depth).
-#         In-place Outputs:
-#             weights_sum: float, [N,], the alpha channel
-#             depth: float, [N,], the depth value
-#             image: float, [N, 3], the RGB channel (after multiplying alpha!)
-#             feature_map: float, [N, feature_dim], the feature dimension (after multiplying alpha!)
-#         '''
-#         _backend._composite_rays_with_features(n_alive, n_step, feature_dim, T_thresh, rays_alive, rays_t, sigmas, rgbs, sam_fs, deltas, weights_sum, depth, image, mask_out)
-#         return tuple()
-
-
-# composite_rays_with_masks = _composite_rays_with_masks.apply

@@ -11,6 +11,7 @@ import trimesh
 
 import torch
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 from .utils import get_rays
 
@@ -96,7 +97,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 
 
 class NeRFDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test=10):
+    def __init__(self, opt, device, type='train', downscale=1, n_test=10, **kwargs):
         super().__init__()
         
         self.opt = opt

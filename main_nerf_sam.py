@@ -67,18 +67,22 @@ if __name__ == '__main__':
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
 
     ### mask training options
-    parser.add_argument('--train_sam', action='store_true', help="train sam, use only after rgbsigma is converged")
     parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
-    parser.add_argument('--mask3d_loss_weight', type=float, default=1.0, help="3d mask loss weight")
-    parser.add_argument('--label_regularization_weight', type=float, default=0., help="label regularization weight")
+    parser.add_argument('--mask3d_loss_weight', type=float, default=0.0, help="3d mask loss weight")
+    parser.add_argument('--label_regularization_weight', type=float, default=0.0, help="label regularization weight")
+
+    ### SAM training options
+    parser.add_argument('--train_sam', action='store_true', help="train sam, use only after rgbsigma is converged")
     parser.add_argument('--feature_dim', type=int, default=256, help="dimension of features")
-    parser.add_argument('--load_feature', action='store_true', help="load the feature from some local directory")
+    parser.add_argument('--load_feature', action='store_true', help="load SAM feature from file")
     parser.add_argument('--augmentation', type=float, default=1.,  help="Augment training data using NeRF output if it is larger than 0.")    
     parser.add_argument('--sam_checkpoint', type=str, default=None, help="dimension of features")
     parser.add_argument('--online', action='store_true', help="Online mode. Do not load features or images in advance")
     parser.add_argument('--mask_loss_weight', type=float, default=0., help="mask loss weight")
     parser.add_argument('--prompt_sample', type=str, default='uniform', choices=['uniform', 'random'],)
     parser.add_argument('--sample_step', type=int, default=20)
+    parser.add_argument('--cache_size', type=int, default=0, help="cache size for online mode, 0 means disable")
+    parser.add_argument('--cache_freq', type=int, default=4, help="use new data every cache_freq iterations")
     
     parser.add_argument('--wandb', action='store_true', help='Whether to use wandb for logging.')
     parser.add_argument('--dataset_name', type=str, default='nerf', choices=['nerf', '3dfront', 'scannet', 'hypersim'], 
@@ -86,6 +90,8 @@ if __name__ == '__main__':
     
 
     opt = parser.parse_args()
+
+    torch.cuda.set_device(opt.gpu)
 
     if opt.O:
         opt.fp16 = True
@@ -137,19 +143,22 @@ if __name__ == '__main__':
 
     criterion = torch.nn.MSELoss(reduction='none') 
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     Trainer_ = SAMTrainer if opt.train_sam else Trainer
     Dataset_ = NeRFSAMDataset if opt.train_sam else NeRFDataset
 
     if opt.test:
-        metrics = [PSNRMeter()]
+        
         if not opt.train_sam:
-            metrics.append(LPIPSMeter(device=device))
+            metrics = [PSNRMeter(), LPIPSMeter(device=device)]
         else:
-            metrics.append(MSEMeter())
+            metrics = [MSEMeter()]
 
-        test_loader = Dataset_(opt, device=device, type='test', n_test_per_pose=10, feature_dim=opt.feature_dim, dataset_name=opt.dataset_name).dataloader()
+
+        test_loader = Dataset_(opt, device=device, type='test', n_test_per_pose=10, feature_dim=opt.feature_dim, 
+                               dataset_name=opt.dataset_name).dataloader()
+
         feature_dim = test_loader._data.feature_dim if opt.train_sam else None
 
         model = NeRFNetwork(
@@ -161,8 +170,6 @@ if __name__ == '__main__':
             density_thresh=opt.density_thresh,
             bg_radius=opt.bg_radius,
         )
-        
-        
   
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, criterion=criterion, 
                            fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, load_model_only=opt.load_model_only)                         
@@ -182,7 +189,8 @@ if __name__ == '__main__':
     else:
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
-        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim, dataset_name=opt.dataset_name).dataloader()
+        train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim, 
+                                dataset_name=opt.dataset_name).dataloader()
 
         model = NeRFNetwork(
             encoding="hashgrid",
@@ -201,34 +209,34 @@ if __name__ == '__main__':
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
-        metrics = [PSNRMeter()]
         if not opt.train_sam:
-            metrics.append(LPIPSMeter(device=device))
+            metrics = [PSNRMeter(), LPIPSMeter(device=device)]
         else:
-            metrics.append(MSEMeter())
+            metrics = [MSEMeter()]
 
         trainer = Trainer_('ngp', opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, 
                            criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, 
                            scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, 
-                           eval_interval=10, load_model_only=opt.load_model_only, load_feature = opt.load_feature,
-                           predictor=predictor)
+                           eval_interval=10, load_model_only=opt.load_model_only, predictor=predictor)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)
             gui.render()
         
         else:
-            valid_loader = Dataset_(opt, device=device, type='val', downscale=1, dataset_name=opt.dataset_name).dataloader()
+
+            valid_loader = Dataset_(opt, device=device, type='val', downscale=1, 
+                                    dataset_name=opt.dataset_name).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
 
             # also test
-            test_loader = Dataset_(opt, device=device, type='test', dataset_name=opt.dataset_name).dataloader()
+            test_loader = Dataset_(opt, device=device, type='test_all', dataset_name=opt.dataset_name).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
             
-            trainer.test(test_loader, write_video=True) # test and save video
+            trainer.test(test_loader, write_video=False) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)
