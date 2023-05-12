@@ -21,6 +21,6 @@ neus/
 workspace
 *.sh
 wandb
-
+*.ipynb
 *.npy
 *.png

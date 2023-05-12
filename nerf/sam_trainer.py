@@ -3,6 +3,7 @@ import os
 import tqdm
 import imageio
 import json
+import wandb
 
 import numpy as np
 
@@ -13,8 +14,8 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from .utils import Trainer, preprocess_feature, postprocess_feature, print_shape, get_rays, linear_to_srgb
-
+from .utils import Trainer, preprocess_feature, postprocess_feature, print_shape, get_rays, linear_to_srgb, project_to_2d, project_to_3d, custom_meshgrid
+from .helper import show_points, show_mask
 
 class Cache:
     def __init__(self, size=100):
@@ -51,6 +52,10 @@ class SAMTrainer(Trainer):
         if self.opt.mask_loss_weight > 0:
             self.mask_criterion = torch.nn.BCEWithLogitsLoss()
 
+
+        if self.opt.consistency_loss_weight > 0:
+            self.consistency_criterion = torch.nn.BCEWithLogitsLoss()
+
         if predictor is not None:
             self.predictor.model.to(self.device)
 
@@ -77,18 +82,18 @@ class SAMTrainer(Trainer):
         padw = target_feature_size - w
         return F.pad(features, (0, padw, 0, padh)).numpy()[0]
 
-    def label_regularization(self, depth, pred_masks):
+    def label_regularization(self, depth, pred_masks, H , W):
         '''
         depth: [B, N]
         pred_masks: [B, N, num_instances]
         '''
-        pred_masks = pred_masks.view(-1, self.opt.patch_size, self.opt.patch_size, 
-            self.num_instances).permute(0, 3, 1, 2).contiguous() # [B, num_instances, patch_size, patch_size]
+        pred_masks = pred_masks.view(-1, H, W)[None, ...].contiguous()
 
         diff_x = pred_masks[:, :, :, 1:] - pred_masks[:, :, :, :-1]
         diff_y = pred_masks[:, :, 1:, :] - pred_masks[:, :, :-1, :]
 
-        depth = depth.view(-1, self.opt.patch_size, self.opt.patch_size) # [B, patch_size, patch_size]
+
+        depth = depth.view(-1, H, W) # [B, patch_size, patch_size]
 
         depth_diff_x = depth[:, :, 1:] - depth[:, :, :-1]
         depth_diff_y = depth[:, 1:, :] - depth[:, :-1, :]
@@ -120,21 +125,38 @@ class SAMTrainer(Trainer):
 
         return input_point, input_label
 
-    def sam_forward(self, point_coords, point_labels, features, H, W):
+    def sam_forward(self, features, H, W, point_coords=None, point_labels=None, mask_input=None):
         predictor = self.predictor
         sam = self.predictor.model
-
-        point_coords = predictor.transform.apply_coords(point_coords, (H, W))
-        coords_torch = torch.as_tensor(point_coords, dtype=torch.float, device=predictor.device)
-        labels_torch = torch.as_tensor(point_labels, dtype=torch.int, device=predictor.device)
-        coords_torch, labels_torch = coords_torch[:, None, :], labels_torch[:, None]
-        points = (coords_torch, labels_torch)
+        if point_coords is not None and point_labels is not None:
+            point_coords = predictor.transform.apply_coords_torch(point_coords, (H, W))
+            coords_torch = torch.as_tensor(point_coords, dtype=torch.float, device=predictor.device)
+            labels_torch = torch.as_tensor(point_labels, dtype=torch.int, device=predictor.device)
+            coords_torch, labels_torch = coords_torch[:, None, :], labels_torch[:, None]
+            points = (coords_torch, labels_torch)
+        else:
+            points = None
+        
+        if mask_input is not None:
+            B, H, W = mask_input.shape
+            max_l = max(H, W)
+            target_size = 256
+            resized_size = (int(H / max_l * target_size), int(W / max_l * target_size))
+            mask_input = F.interpolate(mask_input[:, None, ...], resized_size, mode="bilinear", align_corners=False)
+            
+            padh = target_size - resized_size[0]
+            padw = target_size - resized_size[1]
+            mask_input = F.pad(mask_input, (0, padw, 0, padh))
+            mask_input_torch = torch.as_tensor(mask_input, dtype=torch.float, device=self.device)
+        else:
+            mask_input_torch = None
+            
 
         # Embed prompts
         sparse_embeddings, dense_embeddings = sam.prompt_encoder(
             points=points,
             boxes=None,
-            masks=None,
+            masks=mask_input_torch,
         )
 
         # Predict masks
@@ -163,14 +185,57 @@ class SAMTrainer(Trainer):
         )
 
         return masks, iou_preds, low_res_masks
-            
-    def mask_loss(self, pred_features, H, W, points_per_batch=64):
+    
+    
+    def predict_mask_from_feature_and_point(self, pred_features, H, W, num_batches, input_point, input_label, points_per_batch=64):
+        pred_features = postprocess_feature(pred_features, 64)
+        nerf_masks = []
+        for i in range(num_batches):
+            pred_masks, _, _ = self.sam_forward(
+                pred_features, H, W,
+                input_point[i*points_per_batch:(i+1)*points_per_batch, :], 
+                input_label[i*points_per_batch:(i+1)*points_per_batch], 
+                
+            )
+
+            nerf_masks.append(pred_masks[:, -1].flatten(1))
+
+        nerf_masks = torch.cat(nerf_masks, dim=0)
+        return nerf_masks
+    def predict_mask_from_feature_and_mask(self, pred_features, H, W, num_batches, sec_project_mask, points_per_batch=64):
+        pred_features = postprocess_feature(pred_features, 64)
+        nerf_masks = []
+        for i in range(num_batches):
+
+            pred_masks, _, _ = self.sam_forward(
+                pred_features, H, W,
+                mask_input=sec_project_mask[i*points_per_batch:(i+1)*points_per_batch, ...]
+            )
+            nerf_masks.append(pred_masks[:, -1].flatten(1))
+
+        nerf_masks = torch.cat(nerf_masks, dim=0)
+        return nerf_masks
+    def predict_gt_masks(self, image, H, W, num_batches, input_point, points_per_batch=64):
+        gt_masks = []
+
+        self.predictor.set_image(image)
+        for i in range(num_batches):
+            masks, _, _ = self.sam_batch_predict(
+                input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), H, W
+            )   # [B, 3, H, W]
+
+            gt_masks.append(masks[:, -1].flatten(1))  # use the last level mask
+
+        gt_masks = torch.cat(gt_masks, dim=0).to(torch.float32)
+        return gt_masks
+    def mask_loss(self, image, pred_features, H, W, points_per_batch=64):
         input_point, input_label = self.generate_prompt(H, W)
         num_batches = int(np.ceil(input_point.size(0) / points_per_batch))
 
         with torch.no_grad():
             gt_masks = []
 
+            self.predictor.set_image(image)
             for i in range(num_batches):
                 masks, _, _ = self.sam_batch_predict(
                     input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), H, W
@@ -184,17 +249,80 @@ class SAMTrainer(Trainer):
         nerf_masks = []
         for i in range(num_batches):
             pred_masks, _, _ = self.sam_forward(
+                pred_features, H, W,
                 input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), 
                 input_label[i*points_per_batch:(i+1)*points_per_batch].numpy(), 
-                pred_features, H, W
+                
             )
 
             nerf_masks.append(pred_masks[:, -1].flatten(1))
 
         nerf_masks = torch.cat(nerf_masks, dim=0)
         loss = self.mask_criterion(nerf_masks, gt_masks)
-        return loss
+        return loss, nerf_masks
     
+    
+    def point_projection(self, point, data, depth, sec_depth, threshold = 0.1):
+        
+        H,W = depth.shape
+        point = point.to(torch.long).to(self.device)
+        pts_3D = project_to_3d(point, data['pose'], data['intrinsics'], depth)
+        pts_2D, pts_depth = project_to_2d(pts_3D, data['sec_pose'], data['intrinsics'])
+        im_depth = sec_depth[pts_2D[...,1].clamp(0, H-1).to(torch.long), pts_2D[..., 0].clamp(0, W-1).to(torch.long)]
+        
+        valid_0 = (pts_depth > 0.) & (torch.abs(im_depth- pts_depth) < threshold ) 
+        valid_1 = (pts_2D[..., 0] >= 0) & (pts_2D[..., 0] < W)
+        valid_2 = (pts_2D[..., 1] >= 0) & (pts_2D[..., 1] < H)
+        return pts_2D, (valid_0 & valid_1) & valid_2
+    
+    def mask_projection(self, masks, data, depth, sec_depth, threshold = 0.05):
+        B, H, W = masks.shape
+        i, j = custom_meshgrid(torch.linspace(0, W-1, W, device=self.device), torch.linspace(0, H-1, H, device=self.device)) # float
+        # i = i[None,...].repeat(masks.shape[0],1,1)
+        # j = j[None,...].repeat(masks.shape[0],1,1)
+
+
+        i = i.t().reshape([-1])
+        j = j.t().reshape([-1])
+        
+
+        depth = depth.to(self.device)
+        sec_depth = sec_depth.to(self.device)
+        
+        masks_pts = torch.stack([i,j], -1).to(self.device).to(torch.long)
+        
+        pts_3D = project_to_3d(masks_pts, data['pose'], data['intrinsics'], depth)
+        pts_2D, pts_depth = project_to_2d(pts_3D, data['sec_pose'], data['intrinsics'])
+
+        # pts_2D = pts_2D.reshape([H, W, 2])
+        # pts_depth = pts_depth.reshape([H, W])
+        
+        im_depth = sec_depth[pts_2D[...,1].clamp(0, H-1).to(torch.long), pts_2D[..., 0].clamp(0, W-1).to(torch.long)]
+        valid_0 = (pts_depth > 0.) & (torch.abs(im_depth- pts_depth) < threshold ) 
+        valid_1 = (pts_2D[..., 0] >= 0) & (pts_2D[..., 0] < W)
+        valid_2 = (pts_2D[..., 1] >= 0) & (pts_2D[..., 1] < H)
+        valid = (valid_0 & valid_1) & valid_2
+        valid = valid[None,...].expand(B, -1)
+        
+        
+        masks = masks > 0.0
+        masks = masks.reshape([B, -1])
+        valid = masks & valid
+        
+        pts_2D = pts_2D[None,...].expand(B, -1, -1).reshape([-1, 2])
+        valid = valid.reshape(-1)
+        pts_2D[torch.logical_not(valid)] = torch.tensor([W, H]).to(self.device)
+        pts_2D = pts_2D.reshape([B, -1, 2])
+
+        sec_masks = torch.zeros([B, H+1, W+1])
+        sec_masks[torch.arange(B)[:, None].expand(-1, H*W), pts_2D[..., 1], pts_2D[..., 0]] = 1.
+        # sec_masks = sec_masks.reshape(-1)
+        
+        
+        sec_masks = sec_masks[:, :H, :W]
+        
+        return sec_masks
+        
     def get_sam_features_online(self, data):
         H_full, W_full = data['full_H'], data['full_W']
         H, W = data['H'], data['W'] # feature size
@@ -213,7 +341,7 @@ class SAMTrainer(Trainer):
                                             perturb=False, force_all_rays=True, **vars(self.opt))
             imgs = img_outputs['image'].reshape(-1, H_full, W_full, 3).detach().cpu().numpy()
             imgs = (imgs * 255).astype(np.uint8) # [B, H_full, W_full, 3]
-
+            cv2.imwrite('rgb.png', cv2.cvtColor(imgs[0], cv2.COLOR_RGB2BGR))  
             # temp_dir = os.path.join(self.workspace, 'sam_imgs')
             # os.makedirs(temp_dir, exist_ok=True)
 
@@ -228,10 +356,20 @@ class SAMTrainer(Trainer):
                 gt_features.append(emb)
 
             torch.cuda.empty_cache()
-
+            
+            if self.opt.consistency_loss_weight:
+                rays_full_o = data['sec_full_rays_o'] # [B, N, 3]
+                rays_full_d = data['sec_full_rays_d'] # [B, N, 3]
+                sec_img_outputs = self.model.render(rays_full_o, rays_full_d, render_feature=False, staged=True, 
+                                perturb=False, force_all_rays=True, **vars(self.opt))
+                sec_imgs = sec_img_outputs['image'].reshape(-1, H_full, W_full, 3).detach().cpu().numpy()
+                sec_imgs = (sec_imgs * 255).astype(np.uint8) # [B, H_full, W_full, 3]
+                cv2.imwrite('sec_rgb.png', cv2.cvtColor(sec_imgs[0], cv2.COLOR_RGB2BGR))  
         gt_features = torch.stack(gt_features, dim=0).to(self.device) # [B, H, W, feature_dim]
         data['feature'] = gt_features
-
+        data['images'] = imgs
+        data['depth'] = img_outputs['t_depth'].reshape(-1, H_full, W_full).detach().cpu().numpy()
+        data['sec_depth'] = sec_img_outputs['t_depth'].reshape(-1, H_full, W_full).detach().cpu().numpy()
         if is_training:
             self.model.train()
         self.model.cuda_ray = cuda_ray
@@ -273,7 +411,6 @@ class SAMTrainer(Trainer):
                                     force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
 
         pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
-        # pred_feature = outputs['sam_feature']
         
         loss = self.criterion(pred_feature, gt_feature).mean(-1) # [B, N, feature_dim] --> [B, N]
 
@@ -302,17 +439,62 @@ class SAMTrainer(Trainer):
 
         loss = loss.mean()
 
-        if self.opt.label_regularization_weight > 0:
-            loss = loss + self.label_regularization(outputs['depth'], pred_feature) * self.opt.label_regularization_weight
+
+        if self.opt.consistency_loss_weight > 0:
+            
+            rays_o = data['sec_rays_o'] # [B, N, 3]
+            rays_d = data['sec_rays_d'] # [B, N, 3]
+            sec_outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
+                                    force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
+
+            sec_pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
         
-        if self.opt.mask_loss_weight > 0:
-            pred_feature = pred_feature.reshape(B, data['H'], data['W'], -1)
-            loss = loss + self.mask_loss(pred_feature, data['full_H'], data['full_W']) * self.opt.mask_loss_weight
-        
+
+
+        input_point, input_label = self.generate_prompt(data['full_H'], data['full_W'])
+        points_per_batch = self.opt.points_per_batch
+        num_batches = int(np.ceil(input_point.size(0) / points_per_batch))
+        if self.opt.mask_loss_weight > 0 or self.opt.consistency_loss_weight > 0:
+            nerf_point_masks = self.predict_mask_from_feature_and_point(pred_feature, data['H'], data['W'], num_batches, input_point, input_label, points_per_batch)
+            
+            if self.opt.mask_loss_weight > 0:
+                with torch.no_grad():
+                    gt_masks = self.predict_gt_masks(data['images'][0], data['H'], data['W'], num_batches, input_point, points_per_batch)
+            
+                mask_loss = self.mask_criterion(nerf_point_masks, gt_masks)
+                mask_loss *= self.opt.mask_loss_weight
+                # mask_loss, nerf_masks = self.mask_loss(data['images'][0], pred_feature, data['full_H'], data['full_W'])
+                # mask_loss *= self.opt.mask_loss_weight
+                loss = loss + mask_loss
+                if self.opt.label_regularization_weight > 0:
+                    loss = loss + self.label_regularization(data['depth'], nerf_point_masks, data['full_H'], data['full_W']) * self.opt.label_regularization_weight
+            
+                if self.opt.wandb:
+                    wandb.log({
+                        'mask_loss': mask_loss.item()
+                    }, commit=False)
+            if self.opt.consistency_loss_weight > 0:
+                # show_points('/disk1/yliugu/torch-ngp/rgb.png', input_point)
+                depth, sec_depth = torch.as_tensor(data['depth'][0]).to(self.device), torch.as_tensor(data['sec_depth'][0]).to(self.device)
+                sec_input_point, valid = self.point_projection(input_point, data, depth, sec_depth )
+                sec_input_point = sec_input_point[valid]
+                # show_points('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_input_point.detach().cpu().numpy())
+                
+                nerf_point_masks = nerf_point_masks.reshape([nerf_point_masks.size(0), data['full_H'], data['full_W']])
+                sec_project_mask = self.mask_projection(nerf_point_masks[valid], data, depth, sec_depth)
+                # show_mask('/disk1/yliugu/torch-ngp/rgb.png', nerf_point_masks[valid][0].detach().cpu().numpy() > 0.)
+                # show_mask('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_project_mask[0].detach().cpu().numpy())
+                # exit() 
+                # sec_nerf_point_mask = sec_nerf_point_mask.detach().cpu().numpy()
+                sec_nerf_mask_mask = self.predict_mask_from_feature_and_mask(pred_feature, data['H'], data['W'], num_batches, sec_project_mask)
+                sec_nerf_point_mask = self.predict_mask_from_feature_and_point(pred_feature, data['H'], data['W'], num_batches, sec_input_point, input_label[valid], points_per_batch)
+                consistency_loss = self.consistency_criterion(sec_nerf_point_mask, sec_nerf_mask_mask>0) * self.opt.consistency_loss_weight 
+                
+                loss = loss + consistency_loss
         # 3d mask constraints
-        if self.opt.mask3d_loss_weight > 0:
-            mask3d_loss = self.mask3d_loss(data)
-            loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
+        # if self.opt.mask3d_loss_weight > 0:
+        #     mask3d_loss = self.mask3d_loss(data)
+        #     loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
 
         return pred_feature, gt_feature, loss
     
@@ -342,14 +524,131 @@ class SAMTrainer(Trainer):
                 
         loss = self.criterion(pred_feature, gt_feature).mean()
 
-        if self.opt.label_regularization_weight > 0:
-            loss = loss + self.label_regularization(outputs['depth'], pred_feature) * self.opt.label_regularization_weight
-
-        if self.opt.mask3d_loss_weight > 0:
-            mask3d_loss = self.mask3d_loss(data)
-            loss = loss + mask3d_loss.mean() * self.opt.mask3d_loss_weight
-
         return pred_rgb, pred_depth, pred_feature, gt_feature, loss
+    
+    
+    def train_one_epoch(self, loader):
+        self.log(f"==> Start Training Epoch {self.epoch}, lr={self.optimizer.param_groups[0]['lr']:.6f} ...")
+
+        total_loss = 0
+        if self.local_rank == 0 and self.report_metric_at_train:
+            for metric in self.metrics:
+                metric.clear()
+
+        self.model.train()
+
+        # distributedSampler: must call set_epoch() to shuffle indices across multiple epochs
+        # ref: https://pytorch.org/docs/stable/data.html
+        if self.world_size > 1:
+            loader.sampler.set_epoch(self.epoch)
+        
+        if self.local_rank == 0:
+            pbar = tqdm.tqdm(total=len(loader) * loader.batch_size, bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+
+        self.local_step = 0
+
+        for data in loader:
+            if self.opt.consistency_loss_weight > 0:
+                consistency_offset = 2
+                for index in range(len(data['poses'])):
+                    self.optimizer.zero_grad(set_to_none=True)
+                    sec_index = (index + consistency_offset) % len(data['poses'])
+                    train_data = {
+                        'H': data['H'],
+                        'W': data['W'],
+                        'rays_o': data['rays'][index]['rays_o'].to(self.device),
+                        'rays_d': data['rays'][index]['rays_d'].to(self.device),
+                        'full_H': data['full_H'],
+                        'full_W': data['full_W'],
+                        'full_rays_o': data['full_rays'][index]['rays_o'].to(self.device),
+                        'full_rays_d': data['full_rays'][index]['rays_d'].to(self.device),
+                        'pose': data['poses'][index].to(self.device),
+                        'index': data['index'],
+                        # The following items are used for consistency loss.
+                        'sec_rays_o': data['rays'][sec_index]['rays_o'].to(self.device),
+                        'sec_rays_d': data['rays'][sec_index]['rays_d'].to(self.device),
+                        'sec_full_rays_o': data['full_rays'][sec_index]['rays_o'].to(self.device),
+                        'sec_full_rays_d': data['full_rays'][sec_index]['rays_d'].to(self.device),
+                        'sec_pose': data['poses'][sec_index].to(self.device),
+                        'intrinsics': data['intrinsics'].to(self.device)
+                    }
+                    
+                    with torch.cuda.amp.autocast(enabled=self.fp16):
+                        preds, truths, loss = self.train_step(train_data)
+                    self.scaler.scale(loss).backward()
+
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                    if self.scheduler_update_every_step:
+                        self.lr_scheduler.step()
+
+                    loss_val = loss.detach().item()
+                    total_loss += loss_val
+                    self.local_step += 1
+                    self.global_step += 1
+                pass
+            else:
+                self.local_step += 1
+                self.global_step += 1
+
+                self.optimizer.zero_grad(set_to_none=True)
+                with torch.cuda.amp.autocast(enabled=self.fp16):
+                    preds, truths, loss = self.train_step(data)
+                self.scaler.scale(loss).backward()
+
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+                if self.scheduler_update_every_step:
+                    self.lr_scheduler.step()
+
+                loss_val = loss.detach().item()
+                total_loss += loss_val
+
+            if self.local_rank == 0:
+                if self.report_metric_at_train:
+                    for metric in self.metrics:
+                        metric.update(preds, truths)
+                if self.scheduler_update_every_step:
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f}), lr={self.optimizer.param_groups[0]['lr']:.6f}")
+                else:
+                    pbar.set_description(f"loss={loss_val:.4f} ({total_loss/self.local_step:.4f})")
+                pbar.update(loader.batch_size)
+            
+                if self.opt.wandb:
+                    wandb.log({
+                        'lr': self.optimizer.param_groups[0]['lr'],
+                        'loss_val': loss_val,
+                        'loss_avg': total_loss / self.local_step,
+                        'epoch': self.epoch,
+                        'local_step': self.local_step,
+                        'global_step': self.global_step,
+                    })
+            del preds, truths, loss
+            # print(torch.cuda.memory_summary())
+        if self.ema is not None:
+            self.ema.update()
+
+        average_loss = total_loss / self.local_step
+        self.stats["loss"].append(average_loss)
+
+        if self.local_rank == 0:
+            pbar.close()
+            if self.report_metric_at_train:
+                for metric in self.metrics:
+                    self.log(metric.report(), style="red")
+                    if self.use_tensorboardX:
+                        metric.write(self.writer, self.epoch, prefix="train")
+                    metric.clear()
+
+        if not self.scheduler_update_every_step:
+            if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.lr_scheduler.step(average_loss)
+            else:
+                self.lr_scheduler.step()
+        self.log(f"  Average Loss: {average_loss}.  ")
+        self.log(f"==> Finished Epoch {self.epoch}.")
     
     def test_step(self, data, bg_color=None, perturb=False):  
 

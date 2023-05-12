@@ -70,7 +70,12 @@ if __name__ == '__main__':
     parser.add_argument('--mask3d', type=str, default=None, help="3d mask path")
     parser.add_argument('--mask3d_loss_weight', type=float, default=0.0, help="3d mask loss weight")
     parser.add_argument('--label_regularization_weight', type=float, default=0.0, help="label regularization weight")
-
+    parser.add_argument('--mask_loss_weight', type=float, default=0., help="mask loss weight")
+    parser.add_argument('--consistency_loss_weight', type=float, default=0., help="consistency loss weight")
+    parser.add_argument('--points_per_batch', type=int, default=64, help="points per batch")
+       
+    
+    
     ### SAM training options
     parser.add_argument('--train_sam', action='store_true', help="train sam, use only after rgbsigma is converged")
     parser.add_argument('--feature_dim', type=int, default=256, help="dimension of features")
@@ -78,7 +83,7 @@ if __name__ == '__main__':
     parser.add_argument('--augmentation', type=float, default=1.,  help="Augment training data using NeRF output if it is larger than 0.")    
     parser.add_argument('--sam_checkpoint', type=str, default=None, help="dimension of features")
     parser.add_argument('--online', action='store_true', help="Online mode. Do not load features or images in advance")
-    parser.add_argument('--mask_loss_weight', type=float, default=0., help="mask loss weight")
+
     parser.add_argument('--prompt_sample', type=str, default='uniform', choices=['uniform', 'random'],)
     parser.add_argument('--sample_step', type=int, default=20)
     parser.add_argument('--cache_size', type=int, default=0, help="cache size for online mode, 0 means disable")
@@ -94,7 +99,7 @@ if __name__ == '__main__':
     torch.cuda.set_device(opt.gpu)
 
     if opt.O:
-        opt.fp16 = True
+        opt.fp16 = False
         opt.cuda_ray = True
         opt.preload = True
     
@@ -123,8 +128,6 @@ if __name__ == '__main__':
     if opt.mask3d is None:
         opt.mask3d_loss_weight = 0
 
-    if opt.train_sam and opt.label_regularization_weight > 0:
-        assert opt.patch_size > 1, "label regularization only works with patch-based training"
 
     print(opt)
     
