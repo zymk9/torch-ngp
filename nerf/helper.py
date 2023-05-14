@@ -12,8 +12,8 @@ def show_points(output_file, pts_2D):
     plt.figure(figsize=(10,10))
     plt.imshow(image)
     show_points_plt(pts_2D, plt.gca())
-    # plt.axis('off')
-    plt.savefig(output_file)
+    plt.axis('off')
+    plt.savefig(output_file.replace('.png','_pts.png'))
     plt.close()
 
 
@@ -32,6 +32,6 @@ def show_mask(output_file, mask):
     plt.figure(figsize=(10,10))
     plt.imshow(image)
     show_mask_plt(mask, plt.gca())
-    # plt.axis('off')
-    plt.savefig(output_file)
+    plt.axis('off')
+    plt.savefig(output_file.replace('.png','_mask.png'))
     plt.close()

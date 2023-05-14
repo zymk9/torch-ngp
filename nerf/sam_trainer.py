@@ -82,6 +82,19 @@ class SAMTrainer(Trainer):
         padw = target_feature_size - w
         return F.pad(features, (0, padw, 0, padh)).numpy()[0]
 
+    def preprocess_masks(self, mask_input):
+        B, H, W = mask_input.shape
+        max_l = max(H, W)
+        target_size = 256
+        resized_size = (int(H / max_l * target_size), int(W / max_l * target_size))
+        mask_input = F.interpolate(mask_input[:, None, ...], resized_size, mode="bilinear", align_corners=False)
+        
+        padh = target_size - resized_size[0]
+        padw = target_size - resized_size[1]
+        mask_input = F.pad(mask_input, (0, padw, 0, padh))
+        mask_input_torch = torch.as_tensor(mask_input, dtype=torch.float, device=self.device)
+        return mask_input_torch
+
     def label_regularization(self, depth, pred_masks, H , W):
         '''
         depth: [B, N]
@@ -125,6 +138,8 @@ class SAMTrainer(Trainer):
 
         return input_point, input_label
 
+
+    
     def sam_forward(self, features, H, W, point_coords=None, point_labels=None, mask_input=None):
         predictor = self.predictor
         sam = self.predictor.model
@@ -173,13 +188,20 @@ class SAMTrainer(Trainer):
 
         return masks, iou_predictions, low_res_masks
     
-    def sam_batch_predict(self, points, H, W):
+    def sam_batch_predict(self, H, W, points=None, masks_input=None, image=None):
         transformed_points = self.predictor.transform.apply_coords(points, (H, W))
         in_points = torch.as_tensor(transformed_points, device=self.predictor.device)
         in_labels = torch.ones(in_points.shape[0], dtype=torch.int, device=in_points.device)
+        
+        if image is not None:
+            self.predictor.set_image(image[0])
+        if masks_input is not None:
+            masks_input = self.preprocess_masks(masks_input)
+
         masks, iou_preds, low_res_masks = self.predictor.predict_torch(
             in_points[:, None, :],
             in_labels[:, None],
+            mask_input=masks_input,
             multimask_output=True,
             return_logits=False,
         )
@@ -187,14 +209,18 @@ class SAMTrainer(Trainer):
         return masks, iou_preds, low_res_masks
     
     
-    def predict_mask_from_feature_and_point(self, pred_features, H, W, num_batches, input_point, input_label, points_per_batch=64):
+    def predict_mask_from_feature(self, pred_features, H, W, num_batches, input_point=None, input_label=None, masks=None, points_per_batch=64):
         pred_features = postprocess_feature(pred_features, 64)
         nerf_masks = []
         for i in range(num_batches):
+            batch_points = input_point[i*points_per_batch:(i+1)*points_per_batch, :] if input_point is not None else None
+            batch_labels = input_label[i*points_per_batch:(i+1)*points_per_batch] if input_label is not None else None
+            batch_masks = masks[i*points_per_batch:(i+1)*points_per_batch, ...] if masks is not None else None
             pred_masks, _, _ = self.sam_forward(
                 pred_features, H, W,
-                input_point[i*points_per_batch:(i+1)*points_per_batch, :], 
-                input_label[i*points_per_batch:(i+1)*points_per_batch], 
+                point_coords=batch_points, 
+                point_labels=batch_labels,
+                mask_input=batch_masks 
                 
             )
 
@@ -202,26 +228,15 @@ class SAMTrainer(Trainer):
 
         nerf_masks = torch.cat(nerf_masks, dim=0)
         return nerf_masks
-    def predict_mask_from_feature_and_mask(self, pred_features, H, W, num_batches, sec_project_mask, points_per_batch=64):
-        pred_features = postprocess_feature(pred_features, 64)
-        nerf_masks = []
-        for i in range(num_batches):
 
-            pred_masks, _, _ = self.sam_forward(
-                pred_features, H, W,
-                mask_input=sec_project_mask[i*points_per_batch:(i+1)*points_per_batch, ...]
-            )
-            nerf_masks.append(pred_masks[:, -1].flatten(1))
-
-        nerf_masks = torch.cat(nerf_masks, dim=0)
-        return nerf_masks
     def predict_gt_masks(self, image, H, W, num_batches, input_point, points_per_batch=64):
         gt_masks = []
 
         self.predictor.set_image(image)
         for i in range(num_batches):
             masks, _, _ = self.sam_batch_predict(
-                input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), H, W
+                H, W,
+                input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy()
             )   # [B, 3, H, W]
 
             gt_masks.append(masks[:, -1].flatten(1))  # use the last level mask
@@ -238,7 +253,8 @@ class SAMTrainer(Trainer):
             self.predictor.set_image(image)
             for i in range(num_batches):
                 masks, _, _ = self.sam_batch_predict(
-                    input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), H, W
+                    H, W,
+                    input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy(), 
                 )   # [B, 3, H, W]
 
                 gt_masks.append(masks[:, -1].flatten(1))  # use the last level mask
@@ -304,21 +320,18 @@ class SAMTrainer(Trainer):
         valid = (valid_0 & valid_1) & valid_2
         valid = valid[None,...].expand(B, -1)
         
-        
-        masks = masks > 0.0
-        masks = masks.reshape([B, -1])
-        valid = masks & valid
+        masks_binary = masks > 0.0
+        masks_binary = masks_binary.reshape([B, -1])
+        valid = masks_binary & valid
         
         pts_2D = pts_2D[None,...].expand(B, -1, -1).reshape([-1, 2])
         valid = valid.reshape(-1)
         pts_2D[torch.logical_not(valid)] = torch.tensor([W, H]).to(self.device)
         pts_2D = pts_2D.reshape([B, -1, 2])
 
-        sec_masks = torch.zeros([B, H+1, W+1])
-        sec_masks[torch.arange(B)[:, None].expand(-1, H*W), pts_2D[..., 1], pts_2D[..., 0]] = 1.
+        sec_masks = torch.zeros([B, H+1, W+1]) - 10.
+        sec_masks[torch.arange(B)[:, None].expand(-1, H*W), pts_2D[..., 1], pts_2D[..., 0]] = 10.
         # sec_masks = sec_masks.reshape(-1)
-        
-        
         sec_masks = sec_masks[:, :H, :W]
         
         return sec_masks
@@ -336,6 +349,7 @@ class SAMTrainer(Trainer):
         self.model.eval()
 
         gt_features = []
+        sec_gt_features = []
         with torch.no_grad():
             img_outputs = self.model.render(rays_full_o, rays_full_d, render_feature=False, staged=True, 
                                             perturb=False, force_all_rays=True, **vars(self.opt))
@@ -365,6 +379,14 @@ class SAMTrainer(Trainer):
                 sec_imgs = sec_img_outputs['image'].reshape(-1, H_full, W_full, 3).detach().cpu().numpy()
                 sec_imgs = (sec_imgs * 255).astype(np.uint8) # [B, H_full, W_full, 3]
                 cv2.imwrite('sec_rgb.png', cv2.cvtColor(sec_imgs[0], cv2.COLOR_RGB2BGR))  
+                for i in range(imgs.shape[0]):
+                    # imageio.imsave(os.path.join(temp_dir, f'{i}.png'), imgs[i])
+                    self.predictor.set_image(sec_imgs[i])
+                    emb = self.predictor.get_image_embedding().detach()
+                    if emb.shape[-2] != H or emb.shape[-1] != W:
+                        emb = preprocess_feature(emb, H, W)
+                    emb = emb[0].permute(1, 2, 0) # [H, W, feature_dim]
+                    sec_gt_features.append(emb)
         gt_features = torch.stack(gt_features, dim=0).to(self.device) # [B, H, W, feature_dim]
         data['feature'] = gt_features
         data['images'] = imgs
@@ -373,9 +395,32 @@ class SAMTrainer(Trainer):
         if is_training:
             self.model.train()
         self.model.cuda_ray = cuda_ray
-
+        if self.opt.consistency_loss_weight:
+            sec_gt_features = torch.stack(sec_gt_features, dim=0).to(self.device) # [B, H, W, feature_dim]
+            data['sec_feature'] = sec_gt_features
+            data['sec_images'] = sec_imgs
         return gt_features
 
+
+    def generate_project_mask(self, data, nerf_point_masks, input_point, num_batches):
+        with torch.no_grad():
+            depth, sec_depth = torch.as_tensor(data['depth'][0]).to(self.device), torch.as_tensor(data['sec_depth'][0]).to(self.device)
+            sec_input_point, valid = self.point_projection(input_point, data, depth, sec_depth )
+            sec_input_point = sec_input_point[valid]
+
+
+            nerf_point_masks = nerf_point_masks.reshape([nerf_point_masks.size(0), data['full_H'], data['full_W']])
+            sec_project_masks = self.mask_projection(nerf_point_masks[valid], data, depth, sec_depth)
+            
+            # show_mask('/disk1/yliugu/torch-ngp/rgb.png', nerf_point_masks[valid][5].detach().cpu().numpy()>0)
+            # show_mask('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_project_masks[0].detach().cpu().numpy()>0)
+            # show_points('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_input_point[:1].detach().cpu().numpy())
+            # cv2.imwrite('/disk1/yliugu/torch-ngp/sec_rgb_0.png', data['sec_images'][0])
+
+            sec_nerf_mask_masks, _, _ = self.sam_batch_predict(data['H'], data['W'], points=sec_input_point.detach().cpu().numpy(), 
+                                                                masks_input=(sec_project_masks>0).to(torch.float), image=data['sec_images'])
+
+        return sec_nerf_mask_masks
     
     def train_step(self, data):
         bg_color = None
@@ -446,8 +491,8 @@ class SAMTrainer(Trainer):
             rays_d = data['sec_rays_d'] # [B, N, 3]
             sec_outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
                                     force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
-
-            sec_pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
+    
+            sec_pred_feature = sec_outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
         
 
 
@@ -455,8 +500,8 @@ class SAMTrainer(Trainer):
         points_per_batch = self.opt.points_per_batch
         num_batches = int(np.ceil(input_point.size(0) / points_per_batch))
         if self.opt.mask_loss_weight > 0 or self.opt.consistency_loss_weight > 0:
-            nerf_point_masks = self.predict_mask_from_feature_and_point(pred_feature, data['H'], data['W'], num_batches, input_point, input_label, points_per_batch)
-            
+            nerf_point_masks = self.predict_mask_from_feature(pred_feature, data['H'], data['W'], num_batches, input_point=input_point, 
+                                                       input_label=input_label, points_per_batch=points_per_batch)
             if self.opt.mask_loss_weight > 0:
                 with torch.no_grad():
                     gt_masks = self.predict_gt_masks(data['images'][0], data['H'], data['W'], num_batches, input_point, points_per_batch)
@@ -474,29 +519,16 @@ class SAMTrainer(Trainer):
                     wandb.log({
                         'mask_loss': mask_loss.item()
                     }, commit=False)
+                    
+                    
             if self.opt.consistency_loss_weight > 0:
-                
-                depth, sec_depth = torch.as_tensor(data['depth'][0]).to(self.device), torch.as_tensor(data['sec_depth'][0]).to(self.device)
-                sec_input_point, valid = self.point_projection(input_point, data, depth, sec_depth )
-                sec_input_point = sec_input_point[valid]
-                # show_points('/disk1/yliugu/torch-ngp/rgb.png', input_point)
-                # show_points('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_input_point.detach().cpu().numpy())
-                
-                nerf_point_masks = nerf_point_masks.reshape([nerf_point_masks.size(0), data['full_H'], data['full_W']])
-                sec_project_masks = self.mask_projection(nerf_point_masks[valid], data, depth, sec_depth)
-                # show_mask('/disk1/yliugu/torch-ngp/rgb.png', nerf_point_masks[valid][0].detach().cpu().numpy() > 0.)
-                # show_mask('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_project_mask[0].detach().cpu().numpy())
-                # exit() 
-                # sec_nerf_point_mask = sec_nerf_point_mask.detach().cpu().numpy()
-                
-                # print(sec_nerf_mask_mask.max())
-                # print(nerf_point_masks.max())
-                # exit()
-                
-                sec_nerf_mask_mask = self.predict_mask_from_feature_and_mask(pred_feature, data['H'], data['W'], num_batches, sec_project_masks)
-                sec_nerf_point_mask = self.predict_mask_from_feature_and_point(pred_feature, data['H'], data['W'], num_batches, sec_input_point, input_label[valid], points_per_batch)
-                sec_nerf_mask_mask = (sec_nerf_mask_mask > 0).to(torch.float32)
 
+                sec_nerf_mask_mask = self.generate_project_mask(data, nerf_point_masks, input_point, num_batches)
+                sec_nerf_mask_mask = sec_nerf_mask_mask[:, 1, ...]
+                # sec_nerf_mask_mask = sec_nerf_mask_mask.reshape([sec_nerf_mask_mask.size(0), data['full_H'], data['full_W']])
+
+                show_mask('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_nerf_mask_mask[0].detach().cpu().numpy() > 0.)
+                exit() 
                 
                 sec_nerf_point_mask = sec_nerf_point_mask.flatten(1)
                 sec_nerf_mask_mask = sec_nerf_mask_mask.flatten(1)
