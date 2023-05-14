@@ -189,14 +189,13 @@ class SAMTrainer(Trainer):
         return masks, iou_predictions, low_res_masks
     
     def sam_batch_predict(self, H, W, points=None, masks_input=None, image=None):
+
+        if image is not None:
+            self.predictor.set_image(image[0])
         transformed_points = self.predictor.transform.apply_coords(points, (H, W))
         in_points = torch.as_tensor(transformed_points, device=self.predictor.device)
         in_labels = torch.ones(in_points.shape[0], dtype=torch.int, device=in_points.device)
-        
-        if image is not None:
-            self.predictor.set_image(image[0])
-        if masks_input is not None:
-            masks_input = self.preprocess_masks(masks_input)
+
 
         masks, iou_preds, low_res_masks = self.predictor.predict_torch(
             in_points[:, None, :],
@@ -224,7 +223,7 @@ class SAMTrainer(Trainer):
                 
             )
 
-            nerf_masks.append(pred_masks[:, -1].flatten(1))
+            nerf_masks.append(pred_masks)
 
         nerf_masks = torch.cat(nerf_masks, dim=0)
         return nerf_masks
@@ -238,8 +237,7 @@ class SAMTrainer(Trainer):
                 H, W,
                 input_point[i*points_per_batch:(i+1)*points_per_batch, :].numpy()
             )   # [B, 3, H, W]
-
-            gt_masks.append(masks[:, -1].flatten(1))  # use the last level mask
+            gt_masks.append(masks[:, -1])  # use the last level mask
 
         gt_masks = torch.cat(gt_masks, dim=0).to(torch.float32)
         return gt_masks
@@ -407,20 +405,17 @@ class SAMTrainer(Trainer):
             depth, sec_depth = torch.as_tensor(data['depth'][0]).to(self.device), torch.as_tensor(data['sec_depth'][0]).to(self.device)
             sec_input_point, valid = self.point_projection(input_point, data, depth, sec_depth )
             sec_input_point = sec_input_point[valid]
-
-
-            nerf_point_masks = nerf_point_masks.reshape([nerf_point_masks.size(0), data['full_H'], data['full_W']])
-            sec_project_masks = self.mask_projection(nerf_point_masks[valid], data, depth, sec_depth)
+            nerf_point_masks = nerf_point_masks[valid]
+            # nerf_point_masks = nerf_point_masks.reshape([-1, data['full_H'], data['full_W']])
+            sec_project_masks = self.mask_projection(nerf_point_masks, data, depth, sec_depth)
             
-            # show_mask('/disk1/yliugu/torch-ngp/rgb.png', nerf_point_masks[valid][5].detach().cpu().numpy()>0)
-            # show_mask('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_project_masks[0].detach().cpu().numpy()>0)
-            # show_points('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_input_point[:1].detach().cpu().numpy())
-            # cv2.imwrite('/disk1/yliugu/torch-ngp/sec_rgb_0.png', data['sec_images'][0])
+            sec_project_masks = self.preprocess_masks(sec_project_masks)
+            sec_project_masks = (sec_project_masks>0).to(torch.float) * 10 - 5
 
-            sec_nerf_mask_masks, _, _ = self.sam_batch_predict(data['H'], data['W'], points=sec_input_point.detach().cpu().numpy(), 
-                                                                masks_input=(sec_project_masks>0).to(torch.float), image=data['sec_images'])
+            sec_nerf_mask_masks, _, _ = self.sam_batch_predict(data['full_H'], data['full_W'], points=sec_input_point.detach().cpu().numpy(), 
+                                                                masks_input=sec_project_masks, image=data['sec_images'])
 
-        return sec_nerf_mask_masks
+        return sec_nerf_mask_masks, sec_input_point
     
     def train_step(self, data):
         bg_color = None
@@ -500,14 +495,16 @@ class SAMTrainer(Trainer):
         points_per_batch = self.opt.points_per_batch
         num_batches = int(np.ceil(input_point.size(0) / points_per_batch))
         if self.opt.mask_loss_weight > 0 or self.opt.consistency_loss_weight > 0:
-            nerf_point_masks = self.predict_mask_from_feature(pred_feature, data['H'], data['W'], num_batches, input_point=input_point, 
-                                                       input_label=input_label, points_per_batch=points_per_batch)
-            if self.opt.mask_loss_weight > 0:
-                with torch.no_grad():
-                    gt_masks = self.predict_gt_masks(data['images'][0], data['H'], data['W'], num_batches, input_point, points_per_batch)
 
-                
-                mask_loss = self.mask_criterion(nerf_point_masks, gt_masks)
+            with torch.no_grad():
+                gt_masks = self.predict_gt_masks(data['images'][0], data['H'], data['W'], num_batches, input_point, points_per_batch)
+            
+            if self.opt.mask_loss_weight > 0:
+                loss_gt_masks = gt_masks.flatten(1)
+                nerf_point_masks = self.predict_mask_from_feature(pred_feature, data['H'], data['W'], num_batches, input_point=input_point, 
+                                                        input_label=input_label, points_per_batch=points_per_batch)
+                nerf_point_masks = nerf_point_masks[:, -1].flatten(1)
+                mask_loss = self.mask_criterion(nerf_point_masks, loss_gt_masks)
                 mask_loss *= self.opt.mask_loss_weight
                 # mask_loss, nerf_masks = self.mask_loss(data['images'][0], pred_feature, data['full_H'], data['full_W'])
                 # mask_loss *= self.opt.mask_loss_weight
@@ -523,16 +520,14 @@ class SAMTrainer(Trainer):
                     
             if self.opt.consistency_loss_weight > 0:
 
-                sec_nerf_mask_mask = self.generate_project_mask(data, nerf_point_masks, input_point, num_batches)
-                sec_nerf_mask_mask = sec_nerf_mask_mask[:, 1, ...]
-                # sec_nerf_mask_mask = sec_nerf_mask_mask.reshape([sec_nerf_mask_mask.size(0), data['full_H'], data['full_W']])
-
-                show_mask('/disk1/yliugu/torch-ngp/sec_rgb.png', sec_nerf_mask_mask[0].detach().cpu().numpy() > 0.)
-                exit() 
+                sec_nerf_mask_masks, sec_input_point = self.generate_project_mask(data, gt_masks, input_point, num_batches)
                 
-                sec_nerf_point_mask = sec_nerf_point_mask.flatten(1)
-                sec_nerf_mask_mask = sec_nerf_mask_mask.flatten(1)
-                consistency_loss = self.consistency_criterion(sec_nerf_point_mask, sec_nerf_mask_mask) * self.opt.consistency_loss_weight 
+                sec_nerf_point_masks = self.predict_mask_from_feature(sec_pred_feature, data['H'], data['W'], num_batches, input_point=sec_input_point, 
+                                                                    input_label=input_label[:sec_input_point.size(0)], points_per_batch=points_per_batch)
+
+                sec_nerf_point_masks = sec_nerf_point_masks.flatten(2).to(torch.float)
+                sec_nerf_mask_masks = sec_nerf_mask_masks.flatten(2).to(torch.float)
+                consistency_loss = self.consistency_criterion(sec_nerf_point_masks, sec_nerf_mask_masks) * self.opt.consistency_loss_weight 
                 
                 loss = loss + consistency_loss
         # 3d mask constraints
