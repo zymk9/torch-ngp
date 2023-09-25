@@ -22,7 +22,7 @@ We follow the data structure of torch-ngp, which uses a json file to store the c
 ```
 
 3dfront_0110_00
-	|- images/masks
+  |- images/masks
   |  └-...
   └- transforms.json       
 
