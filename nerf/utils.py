@@ -1196,8 +1196,10 @@ class Trainer(object):
             if 'mean_density' in checkpoint_dict:
                 self.model.mean_density = checkpoint_dict['mean_density']
         
+        # If we only load the model and do not need to resume the training, just return here. 
         if model_only:
             return
+
 
         self.stats = checkpoint_dict['stats']
         self.epoch = checkpoint_dict['epoch']
@@ -1576,6 +1578,7 @@ class MaskTrainer(Trainer):
 
                 with torch.cuda.amp.autocast(enabled=self.fp16):
                     preds, preds_depth, preds_mask, gt_mask, loss = self.eval_step(data)
+                file_name = data['file_name']
 
                 # all_gather/reduce the statistics (NCCL only support all_*)
                 if self.world_size > 1:
@@ -1608,9 +1611,9 @@ class MaskTrainer(Trainer):
                         metric.update(preds_mask, gt_mask)
 
                     # save image
-                    save_path = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_rgb.png')
-                    save_path_depth = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_depth.png')
-                    save_path_mask = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_mask.png')
+                    save_path = os.path.join(self.workspace, 'validation', f'{name}_{file_name}_rgb.png')
+                    save_path_depth = os.path.join(self.workspace, 'validation', f'{name}_{file_name}_depth.png')
+                    save_path_mask = os.path.join(self.workspace, 'validation', f'{name}_{file_name}_mask.png')
 
                     #self.log(f"==> Saving validation image to {save_path}")
                     os.makedirs(os.path.dirname(save_path), exist_ok=True)

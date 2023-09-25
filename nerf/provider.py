@@ -122,6 +122,8 @@ class NeRFDataset:
             raise NotImplementedError(f'[NeRFDataset] Cannot find transforms*.json under {self.root_path}')
 
         # load nerf-compatible format data.
+        print(self.mode)
+
         if self.mode == 'colmap':
             with open(os.path.join(self.root_path, 'transforms.json'), 'r') as f:
                 transform = json.load(f)
@@ -359,30 +361,33 @@ class NeRFMaskDataset:
         self.rand_pose = opt.rand_pose
         self.mask3d = opt.mask3d if self.training or self.type == 'val' else None
 
-        if type == 'trainval' or type == 'test' or type == 'test_all': # in test mode, interpolate new frames
-            with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
-                transform = json.load(f)
-            with open(os.path.join(self.root_path, f'val_transforms.json'), 'r') as f:
-                transform_val = json.load(f)
-            # transform['frames'].extend(transform_val['frames'])
-
-            file_paths = set()
-            for frame in transform['frames']:
-                file_paths.add(frame['file_path'])
-            for frame in transform_val['frames']:
-                if frame['file_path'] not in file_paths:
-                    transform['frames'].append(frame)
-
-            sort_key = lambda x: int(x['file_path'].split('/')[-1].split('.')[0])
-            transform['frames'] = sorted(transform['frames'], key=sort_key)
-        # elif type == 'test_all':
+        # if type == 'trainval' or type == 'test': # in test mode, interpolate new frames
         #     with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
         #         transform = json.load(f)
-        # only load one specified split
-        else:
-            with open(os.path.join(self.root_path, f'{type}_transforms.json'), 'r') as f:
-                transform = json.load(f)
+        #     with open(os.path.join(self.root_path, f'val_transforms.json'), 'r') as f:
+        #         transform_val = json.load(f)
+        #     # transform['frames'].extend(transform_val['frames'])
 
+        #     file_paths = set()
+        #     for frame in transform['frames']:
+        #         file_paths.add(frame['file_path'])
+        #     for frame in transform_val['frames']:
+        #         if frame['file_path'] not in file_paths:
+        #             transform['frames'].append(frame)
+
+        #     sort_key = lambda x: int(x['file_path'].split('/')[-1].split('.')[0])
+        #     transform['frames'] = sorted(transform['frames'], key=sort_key)
+        # elif type == 'test_all':
+        #     with open(os.path.join(self.root_path, f'transforms.json'), 'r') as f:
+        #         transform = json.load(f)
+        # # only load one specified split
+        # else:
+        #     with open(os.path.join(self.root_path, f'{type}_transforms.json'), 'r') as f:
+        #         transform = json.load(f)
+
+
+        with open(os.path.join(self.root_path, f'transforms.json'), 'r') as f:
+            transform = json.load(f)
         # load image size
         if 'h' in transform and 'w' in transform:
             self.H = int(transform['h']) // downscale
@@ -397,7 +402,7 @@ class NeRFMaskDataset:
         #     self.num_instances = len(transform['bounding_boxes']) + 1 # +1 for the background
         # else:
         #     raise RuntimeError('Failed to load number of instances, please check the transforms.json!')
-        if 'num_instances' in transform:
+        if 'num_room_objects' in transform:
             self.num_instances = transform['num_instances'] + 1 # +1 for the background
         else:
             raise RuntimeError('Failed to load number of instances, please check the transforms.json!')
@@ -434,7 +439,7 @@ class NeRFMaskDataset:
         
         # read images
         frames = transform["frames"]
-        
+        self.frames = frames
         # for colmap, manually interpolate a test set.
         if type == 'test':
             # choose two random poses, and interpolate between.
@@ -457,8 +462,13 @@ class NeRFMaskDataset:
                     pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
                     self.poses.append(pose)
         else:
+            
+            if type == 'val':
+                frames = frames[:1]
+                self.frames = self.frames[:1]
             self.poses = []
             self.masks = []
+            
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
                 f_path = os.path.join(self.root_path, f['file_path'])
 
@@ -468,8 +478,12 @@ class NeRFMaskDataset:
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
                 pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
-                with h5py.File(f_path, 'r') as mask_data:
-                    mask = np.array(mask_data['cp_instance_id_segmaps'][:])
+                if f_path.endswith('hdf5'):
+                    with h5py.File(f_path, 'r') as mask_data:
+                        mask = np.array(mask_data['cp_instance_id_segmaps'][:])
+                elif f_path.endwith('png'):
+                    mask = cv2.imwrite(f_path)[..., 0]
+                    
 
                 assert mask.max() < self.num_instances, \
                     f'Instance id {mask.max()} exceeds the number of instances {self.num_instances - 1}'
@@ -563,7 +577,10 @@ class NeRFMaskDataset:
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
         }
-
+        
+        
+        results['file_name'] = self.frames[index[0]]['file_path'][9:-5]
+        # print(results['file_name'])
         if self.masks is not None:
             masks = self.masks[index].to(self.device) # [B, H, W]
             if self.training:

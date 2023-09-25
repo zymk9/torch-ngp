@@ -22,7 +22,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
 
     ### training options
-    parser.add_argument('--iters', type=int, default=30000, help="training iters")
+    parser.add_argument('--iters', type=int, default=15000, help="training iters")
     parser.add_argument('--lr', type=float, default=1e-2, help="initial learning rate")
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--load_model_only', action='store_true', help="load model only, ignore optimizer and scheduler.")
@@ -192,7 +192,7 @@ if __name__ == '__main__':
             bg_radius=opt.bg_radius,
             num_instances=num_instances,
         )
-        print(model)
+
 
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
