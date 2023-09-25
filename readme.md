@@ -1,7 +1,3 @@
-
-
-
-
 # Instance Field Training
 
 
@@ -14,7 +10,6 @@ This repository is the official PyTorch implementation of **Instance Field Train
 
 You can also refer to torch-ngp instructions [here](https://github.com/ashawkey/torch-ngp#install) to set up the environment. 
 
-Unfortunately, we do not provide the GUI function similar to the torch-ngp.
 
 
 
