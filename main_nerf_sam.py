@@ -94,8 +94,8 @@ if __name__ == '__main__':
     torch.cuda.set_device(opt.gpu)
 
     if opt.O:
-        opt.fp16 = False
-        opt.cuda_ray = True
+        opt.fp16 = True
+        opt.cuda_ray = False
         opt.preload = True
     
     if opt.patch_size > 1:
@@ -148,6 +148,8 @@ if __name__ == '__main__':
     Trainer_ = SAMTrainer if opt.train_sam else Trainer
     Dataset_ = NeRFSAMDataset if opt.train_sam else NeRFDataset
 
+    downscale = 10 if opt.load_feature and opt.train_sam else 1
+
     if opt.test:
         
         if not opt.train_sam:
@@ -155,8 +157,8 @@ if __name__ == '__main__':
         else:
             metrics = [MSEMeter()]
 
-        test_loader = Dataset_(opt, device=device, type='train', n_test_per_pose=10, feature_dim=opt.feature_dim, 
-                               dataset_name=opt.dataset_name).dataloader()
+        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=10, feature_dim=opt.feature_dim, 
+                               downscale=downscale, dataset_name=opt.dataset_name).dataloader()
         feature_dim = test_loader._data.feature_dim if opt.train_sam else None
 
         model = NeRFNetwork(
@@ -188,7 +190,7 @@ if __name__ == '__main__':
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
         train_loader = Dataset_(opt, device=device, type='train', feature_dim=opt.feature_dim, 
-                                dataset_name=opt.dataset_name).dataloader()
+                                downscale=downscale, dataset_name=opt.dataset_name).dataloader()
 
         model = NeRFNetwork(
             encoding="hashgrid",
@@ -199,11 +201,17 @@ if __name__ == '__main__':
             density_thresh=opt.density_thresh,
             bg_radius=opt.bg_radius,
         )
-        sam = build_sam(checkpoint=opt.sam_checkpoint).eval()
-        
-        for param in sam.parameters():
-            param.requires_grad = False
-        predictor = SamPredictor(sam)
+
+        if opt.train_sam:
+            assert opt.sam_checkpoint is not None, "sam_checkpoint should be specified for training SAM"
+            sam = build_sam(checkpoint=opt.sam_checkpoint).eval()
+            for param in sam.parameters():
+                param.requires_grad = False
+
+            predictor = SamPredictor(sam)
+        else:
+            predictor = None
+
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
@@ -222,18 +230,19 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            valid_loader = Dataset_(opt, device=device, type='val', downscale=1, 
+            valid_loader = Dataset_(opt, device=device, type='val', downscale=downscale, 
                                     dataset_name=opt.dataset_name).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
 
             # also test
-            test_loader = Dataset_(opt, device=device, type='test_all', dataset_name=opt.dataset_name).dataloader()
+            test_loader = Dataset_(opt, device=device, type='test_all', downscale=downscale, 
+                                   dataset_name=opt.dataset_name).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
             
-            trainer.test(test_loader, write_video=False) # test and save video
+            trainer.test(test_loader, write_video=True) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)

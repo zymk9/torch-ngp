@@ -96,7 +96,7 @@ class NeRFNetwork(NeRFSAMRenderer):
             sam_net.append(nn.Linear(in_dim, out_dim, bias=True))
 
         self.sam_net = nn.ModuleList(sam_net)
-        self.norm_sam = nn.LayerNorm(hidden_dim_sam if self.view_dependent else feature_dim)
+        # self.norm_sam = nn.LayerNorm(hidden_dim_sam if self.view_dependent else feature_dim)
 
         if self.view_dependent:
             self.num_layers_sam_dir = num_layers_sam_dir
@@ -120,7 +120,7 @@ class NeRFNetwork(NeRFSAMRenderer):
                 sam_dir_net.append(nn.Linear(in_dim, out_dim, bias=True))
 
             self.sam_dir_net = nn.ModuleList(sam_dir_net)
-            self.norm_sam_dir = nn.LayerNorm(feature_dim)
+            # self.norm_sam_dir = nn.LayerNorm(feature_dim)
 
         # background network
         if self.bg_radius > 0:
@@ -181,7 +181,7 @@ class NeRFNetwork(NeRFSAMRenderer):
             s_sam = self.sam_net[l](s_sam)
             if l != self.num_layers_sam - 1:
                 s_sam = F.relu(s_sam, inplace=True)
-        s_sam = self.norm_sam(s_sam)
+        # s_sam = self.norm_sam(s_sam)
         sam_f = s_sam
                 
         if self.view_dependent:
@@ -193,7 +193,7 @@ class NeRFNetwork(NeRFSAMRenderer):
                 h_sam = self.sam_dir_net[l](h_sam)
                 if l != self.num_layers_sam_dir - 1:
                     h_sam = F.relu(h_sam, inplace=True)
-            h_sam = self.norm_sam_dir(h_sam)
+            # h_sam = self.norm_sam_dir(h_sam)
             sam_f = h_sam
             
         return sigma, color, sam_f

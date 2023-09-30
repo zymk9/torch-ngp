@@ -231,6 +231,11 @@ class SAMTrainer(Trainer):
             torch.cuda.empty_cache()
 
         gt_features = torch.stack(gt_features, dim=0).to(self.device) # [B, H, W, feature_dim]
+
+        # gt_feat_np = gt_features.detach().cpu().numpy()
+        # np.save(os.path.join(temp_dir, 'gt_features.npy'), gt_feat_np)
+        # exit()
+
         data['feature'] = gt_features
         data['images'] = imgs
 
@@ -256,7 +261,7 @@ class SAMTrainer(Trainer):
         else:
             gt_feature = self.get_sam_features_online(data)
 
-        if not use_cache:
+        if not use_cache and self.opt.cache_size > 0:
             self.cache.insert(data)
         
         rays_o = data['rays_o'] # [B, N, 3]
@@ -266,7 +271,7 @@ class SAMTrainer(Trainer):
         self.model.train()
 
         outputs = self.model.render(rays_o, rays_d, render_feature=True, staged=False, bg_color=bg_color, perturb=True, 
-                                    force_all_rays=False if self.opt.patch_size == 1 else True, **vars(self.opt))
+                                    force_all_rays=True, **vars(self.opt))
 
         pred_feature = outputs['sam_feature'].reshape(B, data['H'], data['W'], -1) # [B, N, feature_dim] -> [B, H, W, feature_dim]
  

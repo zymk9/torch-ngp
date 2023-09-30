@@ -155,18 +155,19 @@ class NeRFSAMDataset:
                     continue
                 if opt.load_feature:
                     with np.load(f_path) as data:
-                        res = data['res']
+                        # res = data['res']
                         feature = data['embedding']
-                        feature = feature.reshape(res.tolist()).astype(np.float32)
-                        feature = feature.transpose(1, 2, 0)
+                        # feature = feature.reshape(res.tolist()).astype(np.float32)
 
-                    assert feature.shape[-1] == self.feature_dim , \
+                    assert feature.shape[0] == self.feature_dim , \
                         f'feature dimension does not match.'
-                    assert feature.shape[0] == self.feature_size and feature.shape[1] == self.feature_size, \
+                    assert feature.shape[-2] == self.feature_size and feature.shape[-1] == self.feature_size, \
                         f'feature size does not match.'
                     # resize the features to fit the image size
-                    if feature.shape[0] != self.H or feature.shape[1] != self.W:
+                    if feature.shape[-2] != self.H or feature.shape[-1] != self.W:
                         feature = preprocess_feature(feature, self.H, self.W)
+
+                    feature = feature.transpose(1, 2, 0).astype(np.float32)
                     
                     self.features.append(torch.from_numpy(feature))
                 else:
@@ -242,7 +243,7 @@ class NeRFSAMDataset:
         # random pose without gt images.
         
         scale = 1
-        if self.opt.train_sam:
+        if self.opt.train_sam and self.opt.online:
             scale = max(self.H, self.W) / 64
 
         if index[0] >= len(self.poses):
@@ -264,13 +265,20 @@ class NeRFSAMDataset:
             
             poses = torch.from_numpy(np.stack(poses, axis=0)).to(self.device) # [B, 4, 4]
         else:
-            poses = self.poses[index].to(self.device) # [B, 4, 4]        
+            poses = self.poses[index].to(self.device) # [B, 4, 4]
 
         error_map = None if self.error_map is None else self.error_map[index]
         
         intrinsics = self.intrinsics / scale
         H = int(np.floor(self.H / scale))
         W = int(np.floor(self.W / scale))
+
+        if self.opt.online:
+            dh = np.random.uniform(-0.5, 0.5)
+            dw = np.random.uniform(-0.5, 0.5)
+            intrinsics[2] += dw
+            intrinsics[3] += dh
+
         rays = get_rays(poses, intrinsics, H, W, -1, error_map, self.opt.patch_size)
         full_rays = get_rays(poses, self.intrinsics, self.H, self.W, -1)
 
@@ -291,8 +299,9 @@ class NeRFSAMDataset:
 
         if self.features is not None:
             feature = self.features[index].to(self.device) # [B, H, W, C]
-            if self.training:
-                feature = torch.gather(feature.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
+            # if self.training:
+            #     feature = torch.gather(feature.view(B, -1, self.feature_dim), 1, 
+            #                            torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
             results['feature'] = feature
             
         if self.images is not None:
