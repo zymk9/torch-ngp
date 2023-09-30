@@ -32,7 +32,7 @@ class NeRFSAMDataset:
         self.augmentation = opt.augmentation
 
         self.training = self.type in ['train', 'all', 'trainval']
-        self.num_rays = self.opt.num_rays if self.training else -1
+        self.num_rays = self.opt.num_rays if self.training and not self.opt.cuda_ray else -1
 
         self.rand_pose = opt.rand_pose
         self.mask3d = opt.mask3d if self.training or self.type == 'val' else None
@@ -121,7 +121,6 @@ class NeRFSAMDataset:
                 pose1 = poses[k + 1]
                 rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
                 slerp = Slerp([0, 1], rots)
-    
                 for i in range(n_test_per_pose + 1):
                     ratio = np.sin(((i / n_test_per_pose) - 0.5) * np.pi) * 0.5 + 0.5
                     pose = np.eye(4, dtype=np.float32)
@@ -238,7 +237,7 @@ class NeRFSAMDataset:
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
 
 
-    def collate(self, index):
+    def collate_aug(self, index):
         B = len(index) # a list of length 1
         # random pose without gt images.
         
@@ -262,7 +261,6 @@ class NeRFSAMDataset:
                 pose[:3, :3] = slerp(ratio).as_matrix()
                 pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
                 poses.append(pose)
-            
             poses = torch.from_numpy(np.stack(poses, axis=0)).to(self.device) # [B, 4, 4]
         else:
             poses = self.poses[index].to(self.device) # [B, 4, 4]
@@ -273,21 +271,17 @@ class NeRFSAMDataset:
         H = int(np.floor(self.H / scale))
         W = int(np.floor(self.W / scale))
 
-        if self.opt.online:
-            dh = np.random.uniform(-0.5, 0.5)
-            dw = np.random.uniform(-0.5, 0.5)
-            intrinsics[2] += dw
-            intrinsics[3] += dh
-
         rays = get_rays(poses, intrinsics, H, W, -1, error_map, self.opt.patch_size)
         full_rays = get_rays(poses, self.intrinsics, self.H, self.W, -1)
+
+
 
         results = {
             'H': H,
             'W': W,
             'rays_o': rays['rays_o'],
             'rays_d': rays['rays_d'],
-            # 'index': rays['inds'],
+            'rays_index': rays['inds'],
             'full_H': self.H,
             'full_W': self.W,
             'full_rays_o': full_rays['rays_o'],
@@ -296,6 +290,98 @@ class NeRFSAMDataset:
             'index': index[0],
             'augment': self.augmentation,
         }
+
+
+        # Generate a random pose
+        if self.opt.consistency_loss_weight > 0:
+            pose0 = poses[0]
+            random_index = torch.randint(self.num_data, (1))
+            pose1 = poses[random_index]
+            rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
+            slerp = Slerp([0, 1], rots)
+            ratio = np.sin(((i / 5) - 0.5) * np.pi) * 0.5 + 0.5
+            sec_pose = np.eye(4, dtype=np.float32)
+            sec_pose[:3, :3] = slerp(ratio).as_matrix()
+            sec_pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+
+            full_rays = get_rays(sec_pose[None, ...], self.intrinsics, self.H, self.W, -1)
+            pass
+        if self.features is not None:
+            feature = self.features[index].to(self.device) # [B, H, W, C]
+            if self.training:
+                feature = torch.gather(feature.view(B, -1, self.feature_dim), 1, torch.stack(self.feature_dim * [rays['inds']], -1)) # [B, N, C]
+            results['feature'] = feature
+            
+        if self.images is not None:
+            images = self.images[index].to(self.device) # [B, H, W, 3/4]
+            if self.training:
+                C = images.shape[-1]
+                images = torch.gather(images.view(B, -1, C), 1, torch.stack(C * [rays['inds']], -1)) # [B, N, 3/4]
+            results['images'] = images
+                        
+        if self.mask3d is not None:
+            results['mask3d_coords'] = self.mask3d_coords
+            results['mask3d_labels'] = self.mask3d_labels 
+        
+        # need inds to update error_map
+        if error_map is not None:
+            results['index'] = index
+            results['inds_coarse'] = rays['inds_coarse']
+
+        return results
+
+
+    def collate_aug_slerp(self, index):
+        # random pose without gt images.
+        
+        scale = 1
+        if self.opt.train_sam:
+            scale = max(self.H, self.W) / 64
+
+        poses = self.poses[index]
+        pose0 = poses[0].cpu().numpy()
+        pose1 = poses[1].cpu().numpy()
+        n_sample_pose = 10
+        sample_poses = []
+        rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
+        slerp = Slerp([0, 1], rots)
+        for i in range(n_sample_pose + 1):
+            ratio = np.sin(((i / n_sample_pose) - 0.5) * np.pi) * 0.5 + 0.5
+            pose = np.eye(4, dtype=np.float32)
+            pose[:3, :3] = slerp(ratio).as_matrix()
+            pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+            sample_poses.append(torch.from_numpy(pose))
+            
+            
+
+        error_map = None if self.error_map is None else self.error_map[index]
+        
+        intrinsics = self.intrinsics / scale
+        H = int(np.floor(self.H / scale))
+        W = int(np.floor(self.W / scale))
+
+        sample_rays = []
+        sample_full_rays = []
+        
+        for p in sample_poses:
+            rays = get_rays(p[None, ...], intrinsics, H, W, -1, error_map, self.opt.patch_size)
+            full_rays = get_rays(p[None, ...], self.intrinsics, self.H, self.W, -1)
+            sample_rays.append(rays)
+            sample_full_rays.append(full_rays)
+
+
+        results = {
+            'H': H,
+            'W': W,
+            'rays': sample_rays,
+            'full_H': self.H,
+            'full_W': self.W,
+            'full_rays': sample_full_rays,
+            'poses': sample_poses,
+            'intrinsics': torch.as_tensor(self.intrinsics).to(torch.float32),
+            'index': index,
+        }
+
 
         if self.features is not None:
             feature = self.features[index].to(self.device) # [B, H, W, C]
@@ -324,10 +410,16 @@ class NeRFSAMDataset:
 
     def dataloader(self):
         size = self.num_data
-        if self.training and self.augmentation > 0:
-            size += round(size * self.augmentation) # index >= size means we use random pose.
-        loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate, num_workers=0, 
-                            shuffle=self.training)
+
+        # Set batch_size = 2 so that each time it will load two pose
+        if self.opt.consistency_loss_weight > 0 and self.training:
+            loader = DataLoader(list(range(size)), batch_size=2, collate_fn=self.collate_aug_slerp, num_workers=0, 
+                                shuffle=self.training)          
+        else:
+            if self.training and self.augmentation > 0:
+                size += round(size * self.augmentation)
+            loader = DataLoader(list(range(size)), batch_size=1, collate_fn=self.collate_aug, num_workers=0, 
+                                shuffle=self.training)
         loader._data = self # an ugly fix... we need to access error_map & poses in trainer.
         loader.has_gt = self.features is not None
         return loader

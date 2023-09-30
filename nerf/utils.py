@@ -57,6 +57,48 @@ def print_shape(obj):
     print(shape)
 
 
+def project_to_3d(pts, pose, intrinsics, depth):
+    '''
+    Args:
+        pts: Nx2
+        pose: 4x4
+        intrinsics: fx, fy, cx, cy
+        depth: HxW
+    '''
+    pts = torch.as_tensor(pts)
+    pose = torch.as_tensor(pose).to(pts.device)
+    fx, fy, cx, cy = intrinsics.to(pts.device)
+    zs = torch.ones_like(pts[..., 0]).to(pts.device).to(torch.float32)
+    xs = (pts[..., 0] - cx) / fx * zs
+    ys = (pts[..., 1]  - cy) / fy * zs
+    directions = torch.stack((xs, ys, zs), dim=-1)
+    directions = directions / torch.norm(directions, dim=-1, keepdim=True)
+    pts_z = depth[pts[..., 1], pts[..., 0]] 
+    directions = directions * pts_z[:, None]
+    
+    rays_d = directions @ pose[:3, :3].transpose(1,0) # (N, 3)
+    rays_o = pose[:3, 3] # [3]
+    rays_o = rays_o[None, :]
+    return rays_o + rays_d
+
+def project_to_2d(pts, pose, intrinsics):
+
+    fx, fy, cx, cy = intrinsics
+    pose = torch.as_tensor(pose)
+    pose = torch.inverse(pose)
+    
+    camera_pts = pts @ pose[:3, :3].T
+    camera_pts = camera_pts + pose[:3,3]
+
+    camera_x = camera_pts[..., 0] / camera_pts[..., -1] * fx + cx
+    camera_y = camera_pts[..., 1] / camera_pts[..., -1] * fy + cy
+    
+    pts_depth = torch.norm(camera_pts, dim=-1)
+    sign = torch.ones_like(pts_depth)
+    sign[camera_pts[..., -1] < 0.] = -1.
+    
+    return torch.stack([camera_x, camera_y], dim = -1).to(torch.long), pts_depth * sign
+
 @torch.jit.script
 def linear_to_srgb(x):
     return torch.where(x < 0.0031308, 12.92 * x, 1.055 * x ** 0.41666 - 0.055)
@@ -1014,7 +1056,6 @@ class Trainer(object):
 
             with torch.cuda.amp.autocast(enabled=self.fp16):
                 preds, truths, loss = self.train_step(data)
-         
             self.scaler.scale(loss).backward()
 
             self.scaler.step(self.optimizer)

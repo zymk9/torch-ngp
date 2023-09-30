@@ -183,7 +183,7 @@ class NeRFSAMRenderer(NeRFRenderer):
 
         #print(xyzs.shape, 'valid_rgb:', mask.sum().item())
 
-        # instance mask
+        # sam feature
         if render_feature:
             sam_feature = self.sam(xyzs.reshape(-1, 3), dirs.reshape(-1, 3))
             sam_feature = sam_feature.view(N, -1, self.feature_dim) # [N, T+t, sam_feature]
@@ -279,53 +279,22 @@ class NeRFSAMRenderer(NeRFRenderer):
             sigmas = self.density_scale * sigmas
             #print(f'valid RGB query ratio: {mask.sum().item() / mask.shape[0]} (total = {mask.sum().item()})')
 
-            # special case for CCNeRF's residual learning
-            if len(sigmas.shape) == 2:
-                K = sigmas.shape[0]
-                depths = []
-                t_depths = []
-                images = []
-                feature_maps = []
-                for k in range(K):
-                    if not render_feature:
-                        weights_sum, t_depth, image = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays, T_thresh)
-                    else:
-                        weights_sum, t_depth, image, feature_map = raymarching.composite_rays_with_masks_train(
-                            sigmas[k], rgbs[k], sam_fs[k], deltas, rays, T_thresh
-                        )
 
-                    image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
-                    depth = torch.clamp(t_depth - nears, min=0) / (fars - nears)
-                    images.append(image.view(*prefix, 3))
-                    depths.append(depth.view(*prefix))
-                    t_depths.append(t_depth.view(*prefix))
-
-                    if render_feature:
-                        feature_maps.append(feature_map.view(*prefix, self.feature_dim))
-            
-                depth = torch.stack(depths, axis=0) # [K, B, N]
-                t_depth = torch.stack(t_depths, axis=0) # [K, B, N]
-                image = torch.stack(images, axis=0) # [K, B, N, 3]
-                if render_feature:
-                    feature_map = torch.stack(feature_map, axis=0) # [K, B, N, feature_dim]
-
+            if not render_feature:
+                weights_sum, depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh)
             else:
+                weights_sum, depth, image, feature_map = raymarching.composite_rays_with_masks_train(
+                    sigmas, rgbs, sam_fs, deltas, rays, T_thresh
+                )
+            t_depth = depth
+            image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+            depth = torch.clamp(depth - nears, min=0) / (fars - nears)
+            image = image.view(*prefix, 3)
+            depth = depth.view(*prefix)
 
-                if not render_feature:
-                    weights_sum, t_depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh)
-                else:
-                    weights_sum, t_depth, image, feature_map = raymarching.composite_rays_with_masks_train(
-                        sigmas, rgbs, sam_fs, deltas, rays, T_thresh
-                    )
-                image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
-                depth = torch.clamp(t_depth - nears, min=0) / (fars - nears)
-                image = image.view(*prefix, 3)
-                depth = depth.view(*prefix)
-                t_depth = t_depth.view(*prefix)
-
-                if render_feature:
-                    feature_map = feature_map.view(*prefix, self.feature_dim)
-            
+            if render_feature:
+                feature_map = feature_map.view(*prefix, self.feature_dim)
+        
             results['weights_sum'] = weights_sum
 
         else:
@@ -351,7 +320,6 @@ class NeRFSAMRenderer(NeRFRenderer):
             step = 0
             
             while step < max_steps:
-
                 # count alive rays 
                 n_alive = rays_alive.shape[0]
                 
@@ -383,15 +351,15 @@ class NeRFSAMRenderer(NeRFRenderer):
                 #print(f'step = {step}, n_step = {n_step}, n_alive = {n_alive}, xyzs: {xyzs.shape}')
 
                 step += n_step
-
             image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
-            depth = torch.clamp(t_depth - nears, min=0) / (fars - nears)
+            t_depth = depth
+            depth = torch.clamp(depth - nears, min=0) / (fars - nears)
             image = image.view(*prefix, 3)
             depth = depth.view(*prefix)
             t_depth = t_depth.view(*prefix)
             if render_feature:
                 feature_map = feature_map.view(*prefix, self.feature_dim)
-        
+        results['t_depth'] = t_depth
         results['depth'] = depth
         results['t_depth'] = t_depth
         results['image'] = image
@@ -426,7 +394,6 @@ class NeRFSAMRenderer(NeRFRenderer):
         for xs in X:
             for ys in Y:
                 for zs in Z:
-                    
                     # construct points
                     xx, yy, zz = custom_meshgrid(xs, ys, zs)
                     coords = torch.cat([xx.reshape(-1, 1), yy.reshape(-1, 1), zz.reshape(-1, 1)], dim=-1) # [N, 3], in [0, 128)
@@ -574,7 +541,7 @@ class NeRFSAMRenderer(NeRFRenderer):
         device = rays_o.device
 
         # never stage when cuda_ray
-        if staged and not self.cuda_ray:
+        if staged and not self.cuda_ray :
             depth = torch.empty((B, N), device=device)
             t_depth = torch.empty((B, N), device=device)
             image = torch.empty((B, N, 3), device=device)
@@ -598,7 +565,6 @@ class NeRFSAMRenderer(NeRFRenderer):
             results['image'] = image
             results['sam_feature'] = sam_feature
         else:
-            # print('yes')
             results = _run(rays_o, rays_d, render_feature, **kwargs)
 
         return results
