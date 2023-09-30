@@ -20,6 +20,7 @@ if __name__ == '__main__':
     parser.add_argument('--test', action='store_true', help="test mode")
     parser.add_argument('--workspace', type=str, default='workspace')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--save_path', type=str, default=None)
 
     ### training options
     parser.add_argument('--iters', type=int, default=30000, help="training iters")
@@ -146,7 +147,7 @@ if __name__ == '__main__':
         else:
             metrics.append(MeanIoUMeter())
 
-        test_loader = Dataset_(opt, device=device, type='test_all', n_test_per_pose=2).dataloader()
+        test_loader = Dataset_(opt, device=device, type='test', n_test_per_pose=2).dataloader()
         num_instances = test_loader._data.num_instances if opt.train_mask else None
 
         model = NeRFNetwork(
@@ -172,7 +173,7 @@ if __name__ == '__main__':
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
     
-            trainer.test(test_loader, write_video=False) # test and save video
+            trainer.test(test_loader, write_video=False, save_path=opt.save_path) # test and save video
             
             trainer.save_mesh(resolution=256, threshold=10)
     

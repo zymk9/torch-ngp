@@ -94,7 +94,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 
 
 class NeRFDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test=10):
+    def __init__(self, opt, device, type='train', downscale=1, n_test=10, n_test_per_pose=2):
         super().__init__()
         
         self.opt = opt
@@ -123,7 +123,7 @@ class NeRFDataset:
 
         # load nerf-compatible format data.
         if self.mode == 'colmap':
-            with open(os.path.join(self.root_path, 'transforms.json'), 'r') as f:
+            with open(os.path.join(self.root_path, 'test_transforms.json'), 'r') as f:
                 transform = json.load(f)
         elif self.mode == 'blender':
             # load all splits (train/valid/test), this is what instant-ngp in fact does...
@@ -172,19 +172,26 @@ class NeRFDataset:
         if self.mode == 'colmap' and type == 'test':
             
             # choose two random poses, and interpolate between.
-            f0, f1 = np.random.choice(frames, 2, replace=False)
-            pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
-            pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
-            rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
-            slerp = Slerp([0, 1], rots)
+            # f0, f1 = np.random.choice(frames, 2, replace=False)
+            # pose0 = nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
+            # pose1 = nerf_matrix_to_ngp(np.array(f1['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) # [4, 4]
+            # rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
+            # slerp = Slerp([0, 1], rots)
 
+            # self.poses = []
+            # self.images = None
+            # for i in range(n_test + 1):
+            #     ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
+            #     pose = np.eye(4, dtype=np.float32)
+            #     pose[:3, :3] = slerp(ratio).as_matrix()
+            #     pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+            #     self.poses.append(pose)
             self.poses = []
             self.images = None
-            for i in range(n_test + 1):
-                ratio = np.sin(((i / n_test) - 0.5) * np.pi) * 0.5 + 0.5
-                pose = np.eye(4, dtype=np.float32)
-                pose[:3, :3] = slerp(ratio).as_matrix()
-                pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+            for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):                
+                pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
+
                 self.poses.append(pose)
 
         else:
@@ -359,7 +366,7 @@ class NeRFMaskDataset:
         self.rand_pose = opt.rand_pose
         self.mask3d = opt.mask3d if self.training or self.type == 'val' else None
 
-        if type == 'trainval' or type == 'test' or type == 'test_all': # in test mode, interpolate new frames
+        if type == 'trainval' or type == 'test_all': # in test mode, interpolate new frames
             with open(os.path.join(self.root_path, f'train_transforms.json'), 'r') as f:
                 transform = json.load(f)
             with open(os.path.join(self.root_path, f'val_transforms.json'), 'r') as f:
@@ -438,24 +445,30 @@ class NeRFMaskDataset:
         # for colmap, manually interpolate a test set.
         if type == 'test':
             # choose two random poses, and interpolate between.
-            f = np.random.choice(frames, n_test_poses, replace=False)
-            poses = [nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) for f0 in f]
+            # f = np.random.choice(frames, n_test_poses, replace=False)
+            # poses = [nerf_matrix_to_ngp(np.array(f0['transform_matrix'], dtype=np.float32), scale=self.scale, offset=self.offset) for f0 in f]
 
             self.masks = None
             self.poses = []
 
-            for k in range(len(poses) - 1):
-                pose0 = poses[k]
-                pose1 = poses[k + 1]
-                rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
-                slerp = Slerp([0, 1], rots)
+            # for k in range(len(poses) - 1):
+            #     pose0 = poses[k]
+            #     pose1 = poses[k + 1]
+            #     rots = Rotation.from_matrix(np.stack([pose0[:3, :3], pose1[:3, :3]]))
+            #     slerp = Slerp([0, 1], rots)
     
-                for i in range(n_test_per_pose + 1):
-                    ratio = np.sin(((i / n_test_per_pose) - 0.5) * np.pi) * 0.5 + 0.5
-                    pose = np.eye(4, dtype=np.float32)
-                    pose[:3, :3] = slerp(ratio).as_matrix()
-                    pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
-                    self.poses.append(pose)
+            #     for i in range(n_test_per_pose + 1):
+            #         ratio = np.sin(((i / n_test_per_pose) - 0.5) * np.pi) * 0.5 + 0.5
+            #         pose = np.eye(4, dtype=np.float32)
+            #         pose[:3, :3] = slerp(ratio).as_matrix()
+            #         pose[:3, 3] = (1 - ratio) * pose0[:3, 3] + ratio * pose1[:3, 3]
+            #         self.poses.append(pose)
+
+            for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
+                pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
+
+                self.poses.append(pose)
         else:
             self.poses = []
             self.masks = []
@@ -463,6 +476,7 @@ class NeRFMaskDataset:
                 f_path = os.path.join(self.root_path, f['file_path'])
 
                 if not os.path.exists(f_path):
+                    print(f'Warning: {f_path} does not exist, skipping.')
                     continue
                 
                 pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
