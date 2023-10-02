@@ -37,6 +37,7 @@ You can run the shell script `train_3dfront.sh` to train a NeRF model.
 ```bash
 bash train_3dfront.sh
 ```
+If you would like to train multiple scenes, you can refer to [batch_train.py](./batch_train.py). This python script would help in the following sections related to NeRF training.
 
 
 
