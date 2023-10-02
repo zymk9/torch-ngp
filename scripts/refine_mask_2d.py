@@ -7,9 +7,9 @@ from tqdm import tqdm
 
 
 os.environ['CUDA_VISIBLE_DEVICES'] = '6'
-img_root = '/data/yliugu/front3d_ngp/3dfront_0110_00/train/images'
-mask_root = '/data/bhuai/temp/3dfront_0110_00/nerf_masks'
-output_root = '/data/bhuai/temp/3dfront_0110_00/nerf_refined'
+img_root = '/disk1/yliugu/3dfront_sample/train/images'
+mask_root = '/disk1/yliugu/torch-ngp/workspace/3dfront_sample_instance/validation'
+output_root = '/disk1/yliugu/3dfront_sample_mask/nerf_refined'
 
 os.makedirs(output_root, exist_ok=True)
 
@@ -21,9 +21,10 @@ refiner = refine.Refiner(device='cuda:0')
 n_iter = 1
 
 for i in tqdm(img_list):
-    mask_file = os.path.join(mask_root, i.replace('.jpg', '.png'))
+  
+    mask_file = os.path.join(mask_root, 'ngp_ep0035_' + i.replace('.jpg', '_mask.png'))
     img_file = os.path.join(img_root, i)
-
+    print(mask_file)
     mask = cv2.imread(mask_file)
     image = cv2.imread(img_file)
 
