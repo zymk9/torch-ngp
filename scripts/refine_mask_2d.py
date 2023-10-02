@@ -5,39 +5,54 @@ import numpy as np
 import os
 from tqdm import tqdm
 
+# gpu_list = [1, 2, 3, 4, 6, 7]
+# part = 3
+# num_part = 4
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '6'
-img_root = '/disk1/yliugu/3dfront_sample/train/images'
-mask_root = '/disk1/yliugu/torch-ngp/workspace/3dfront_sample_instance/validation'
-output_root = '/disk1/yliugu/3dfront_sample_mask/nerf_refined'
+mask_root = '/data/bhuai/instance_nerf_data/workspace_new/instance_nerf_masks'
+img_root = '/data/bhuai/instance_nerf_data/front3d_extra_data'
+output_root = '/data/bhuai/instance_nerf_data/workspace_new/nerf_refined'
 
-os.makedirs(output_root, exist_ok=True)
+with open('/data/bhuai/instance_nerf_data/selected.txt', 'r') as f:
+    scenes = f.readlines()
+    scenes = [x.strip() for x in scenes]
+    scenes = ['3dfront_' + x for x in scenes]
 
-img_list = os.listdir(img_root)
-img_list.sort()
+# scenes = os.listdir(mask_root)
+# scenes = sorted(scenes)[part::num_part]
 
-refiner = refine.Refiner(device='cuda:0')
+for scene in tqdm(scenes):
+    mask_dir = os.path.join(mask_root, scene)
+    img_dir = os.path.join(img_root, scene, 'train', 'images')
+    output_dir = os.path.join(output_root, scene)
 
-n_iter = 1
 
-for i in tqdm(img_list):
-  
-    mask_file = os.path.join(mask_root, 'ngp_ep0035_' + i.replace('.jpg', '_mask.png'))
-    img_file = os.path.join(img_root, i)
-    print(mask_file)
-    mask = cv2.imread(mask_file)
-    image = cv2.imread(img_file)
+    os.makedirs(output_dir, exist_ok=True)
 
-    mask = mask[..., 0]
-    instance_list = np.unique(mask)
+    img_list = os.listdir(img_dir)
+    img_list.sort()
 
-    for instance in instance_list:
-        if instance == 0:
-            continue
+    refiner = refine.Refiner(device='cuda:0')
 
-        instance_mask = (mask == instance).astype(np.uint8) * 255
-        for _ in range(n_iter):
-            instance_mask = refiner.refine(image, instance_mask, fast=False, L=900) 
+    n_iter = 1
 
-        output_file = os.path.join(output_root, i.replace('.jpg', f'_{instance}.png'))
-        cv2.imwrite(output_file, instance_mask)
+    for i in tqdm(img_list):
+        mask_file = os.path.join(mask_dir, i.replace('.jpg', '.png'))
+        img_file = os.path.join(img_dir, i)
+
+        mask = cv2.imread(mask_file)
+        image = cv2.imread(img_file)
+
+        mask = mask[..., 0]
+        instance_list = np.unique(mask)
+
+        for instance in instance_list:
+            if instance == 0:
+                continue
+
+            instance_mask = (mask == instance).astype(np.uint8) * 255
+            for _ in range(n_iter):
+                instance_mask = refiner.refine(image, instance_mask, fast=False, L=900) 
+
+            output_file = os.path.join(output_dir, i.replace('.jpg', f'_{instance}.png'))
+            cv2.imwrite(output_file, instance_mask)
