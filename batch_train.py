@@ -145,175 +145,37 @@ def test_mask(rank, world_size, scenes, scene_prefix, workspace, reg_weight):
 
 
 if __name__ == '__main__':
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ngp_option', type=str, default='train_rgb', choices=['train_rgb', 'train_mask', 'test_mask'], 
+                        help='A dataset name for wandb logging')
+    args = parser.parse_args()
+    
     scene_prefix = '/data/bhuai/instance_nerf_data/instance_nerf_refined/front3d_new'
     prev_workspace = '/data/bhuai/instance_nerf_data/workspace_new/instance_nerf'
     new_workspace = '/data/bhuai/instance_nerf_data/workspace_new/instance_nerf_refined'
-    # data_root = '/data/bhuai/instance_nerf_data'
+    data_root = '/data/bhuai/instance_nerf_data'
 
     scenes = os.listdir(scene_prefix)
     scenes = sorted(scenes)
 
-    # train_dirs = []
-    # workspace_dirs = []
-    # for scene in scenes:
-    #     train_dir = os.path.join(scene_prefix, scene, 'train')
-    #     workspace_dir = os.path.join(data_root, 'workspace_new', scene)
-    #     train_dirs.append(train_dir)
-    #     workspace_dirs.append(workspace_dir)
 
-    # fn = partial(train_rgb, world_size=8, train_dirs=train_dirs, workspace_dirs=workspace_dirs)
+    if args.ngp_option == 'train_rgb':
+        train_dirs = []
+        workspace_dirs = []
+        for scene in scenes:
+            train_dir = os.path.join(scene_prefix, scene, 'train')
+            workspace_dir = os.path.join(data_root, 'workspace_new', scene)
+            train_dirs.append(train_dir)
+            workspace_dirs.append(workspace_dir)
 
-    # fn = partial(train_mask, world_size=8, scenes=scenes, scene_prefix=scene_prefix, new_workspace=new_workspace, 
-    #              prev_workspace=prev_workspace, num_iters=20000, reg_weight=1.0)
-
-    fn = partial(test_mask, world_size=8, scenes=scenes, scene_prefix=scene_prefix, workspace=new_workspace, 
+        fn = partial(train_rgb, world_size=8, train_dirs=train_dirs, workspace_dirs=workspace_dirs)
+    elif args.ngp_option == 'train_mask':
+        fn = partial(train_mask, world_size=8, scenes=scenes, scene_prefix=scene_prefix, new_workspace=new_workspace, 
+                    prev_workspace=prev_workspace, num_iters=20000, reg_weight=1.0)
+    elif args.ngp_option == 'test_mask':
+        fn = partial(test_mask, world_size=8, scenes=scenes, scene_prefix=scene_prefix, workspace=new_workspace, 
                  reg_weight=1.0)
 
     process_map(fn, range(8), max_workers=8)
 
-
-# Train RGB
-
-# num_part = 4
-# scene_prefix = '/data/bhuai/instance_nerf_data/scene_data'
-# data_root = '/data/bhuai/instance_nerf_data'
-
-# if __name__ == '__main__':
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--part', type=int, default=0)
-
-#     args = parser.parse_args()
-#     part = args.part
-
-#     # scenes = os.listdir(scene_prefix)
-#     # scenes = sorted(scenes)[part::num_part]
-#     scenes = ['3dfront_0075_01']
-
-#     for scene in tqdm(scenes):
-#         print(f"Run instance_nerf for scene {scene}")
-#         train_dir = os.path.join(scene_prefix, scene, 'train')
-#         workspace_dir = os.path.join(data_root, 'workspace', scene)
-#         os.makedirs(workspace_dir, exist_ok=True)
-
-#         bashCommand = f'python3 main_nerf_mask.py ' \
-#                       f'{train_dir} ' \
-#                       f'--workspace {workspace_dir} ' \
-#                       f'--iters 30000 ' \
-#                       f'--lr 1e-2 ' \
-#                       f'--bound 8 ' \
-#                       f'--gpu {part + 1} ' \
-#                       f'-O ' \
-#                       f'--label_regularization_weight 0.0 ' \
-
-#         process = subprocess.Popen(bashCommand.split(), stderr=sys.stderr, stdout=sys.stdout)
-#         output, error = process.communicate()
-
-
-
-# Train mask
-
-# scene_prefix = '/data/bhuai/instance_nerf_data/instance_nerf_no_reg_refined'
-# prev_workspace = '/data/bhuai/instance_nerf_data/workspace/instance_nerf_no_reg'
-# new_workspace = '/data/bhuai/instance_nerf_data/workspace/instance_nerf_no_reg_refined'
-
-# gpu_list = [1, 2, 3, 4, 6, 7]
-# num_part = 4
-
-# if __name__ == '__main__':
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--part', type=int, default=0)
-
-#     args = parser.parse_args()
-#     part = args.part
-
-#     scenes = os.listdir(scene_prefix)
-#     scenes = sorted(scenes)
-#     scenes = sorted(scenes)[part::num_part]
-#     # scenes = ['3dfront_0089_00']
-
-#     for scene in tqdm(scenes):
-#         print(f"Run instance_nerf mask training for scene {scene}")
-#         train_dir = os.path.join(scene_prefix, scene)
-#         workspace_dir = os.path.join(new_workspace, scene)
-#         os.makedirs(workspace_dir, exist_ok=True)
-
-#         pattern = os.path.join(prev_workspace, scene, 'checkpoints', 'ngp_ep*.pth')
-#         checkpoint_list = sorted(glob.glob(pattern))
-#         if checkpoint_list:
-#             checkpoint = checkpoint_list[-1]
-#             print(f"Load checkpoint from {checkpoint}")
-#         else:
-#             raise ValueError(f"Checkpoint not found for scene {scene}")
-
-#         bashCommand = f'python3 main_nerf_mask.py ' \
-#                       f'{train_dir} ' \
-#                       f'--workspace {workspace_dir} ' \
-#                       f'--iters 20000 ' \
-#                       f'--lr 1e-2 ' \
-#                       f'--bound 8 ' \
-#                       f'--gpu {gpu_list[part]} ' \
-#                       f'-O ' \
-#                       f'--label_regularization_weight 0.0000001 ' \
-#                       f'--ckpt {checkpoint} ' \
-#                       f'--load_model_only ' \
-#                       f'--train_mask ' \
-#                       f'--num_rays 4096 ' \
-#                       f'--patch_size 8 '
-
-#         process = subprocess.Popen(bashCommand.split(), stderr=sys.stderr, stdout=sys.stdout)
-#         output, error = process.communicate()
-
-
-# Test mask
-
-# scene_prefix = '/data/bhuai/instance_nerf_data/instance_nerf'
-# new_workspace = '/data/bhuai/instance_nerf_data/workspace/instance_nerf_no_reg'
-
-# gpu_list = [1, 2, 3, 4, 6, 7]
-# num_part = 6
-
-# if __name__ == '__main__':
-#     parser = argparse.ArgumentParser()
-#     parser.add_argument('--part', type=int, default=0)
-
-#     args = parser.parse_args()
-#     part = args.part
-
-#     scenes = os.listdir(scene_prefix)
-#     scenes = sorted(scenes)
-#     scenes = sorted(scenes)[part::num_part]
-#     scenes = ['3dfront_0089_00']
-
-#     for scene in tqdm(scenes):
-#         print(f"Run instance_nerf mask training for scene {scene}")
-#         train_dir = os.path.join(scene_prefix, scene)
-#         workspace_dir = os.path.join(new_workspace, scene)
-#         os.makedirs(workspace_dir, exist_ok=True)
-
-#         pattern = os.path.join(new_workspace, scene, 'checkpoints', 'ngp_ep*.pth')
-#         checkpoint_list = sorted(glob.glob(pattern))
-#         if checkpoint_list:
-#             checkpoint = checkpoint_list[-1]
-#             print(f"Load checkpoint from {checkpoint}")
-#         else:
-#             raise ValueError(f"Checkpoint not found for scene {scene}")
-
-#         bashCommand = f'python3 main_nerf_mask.py ' \
-#                       f'{train_dir} ' \
-#                       f'--workspace {workspace_dir} ' \
-#                       f'--iters 25000 ' \
-#                       f'--lr 1e-2 ' \
-#                       f'--bound 8 ' \
-#                       f'--gpu {gpu_list[part]} ' \
-#                       f'-O ' \
-#                       f'--label_regularization_weight 1.0 ' \
-#                       f'--ckpt {checkpoint} ' \
-#                       f'--load_model_only ' \
-#                       f'--train_mask ' \
-#                       f'--num_rays 4096 ' \
-#                       f'--patch_size 8 ' \
-#                       f'--test '
-
-#         process = subprocess.Popen(bashCommand.split(), stderr=sys.stderr, stdout=sys.stdout)
-#         output, error = process.communicate()
-        

@@ -9,8 +9,6 @@ This repository contains the NeRF training code of [Instance-NeRF](https://githu
 Refer to torch-ngp instructions [here](https://github.com/ashawkey/torch-ngp#install) to set up the environment. 
 
 
-
-
 ## Usage
 
 ### Dataset Orginzation

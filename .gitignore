@@ -19,5 +19,4 @@ neus/
 *_data
 *_render
 workspace
-*.sh
 wandb

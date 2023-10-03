@@ -54,14 +54,6 @@ with open(scene_json_file) as f:
  
 
 
-kernel = np.ones((5, 5), np.uint8)
-weight = 0.5
-end_weight = 0.4
-iter = 10 
-weight_decrease = (weight - end_weight) / iter
-# for scene in scene_list:
-
-
 for i in tqdm(json_dict['frames']):
     # mask_file = os.path.join(scene_mask_root, i.replace('.jpg', '.png'))
     file_name = i['file_path'][9:-5]
@@ -69,11 +61,9 @@ for i in tqdm(json_dict['frames']):
     img_file = os.path.join(scene_img_root, f'{file_name}.jpg')
     mask_file = os.path.join(scene_mask_root, f'ngp_ep{epoch:04d}_{file_name}_mask.png')
     output_file = os.path.join(scene_output_root, f'{file_name}.hdf5')
-    # init_mask_file = os.path.join(scene_mask_root, i.replace('.jpg', '_s.png'))
-
+    
     mask = cv2.imread(mask_file)[..., 0]
     image = cv2.imread(img_file)
-    # sparse_mask = cv2.imread(init_mask_file)[..., 0]
 
     instance_list = np.unique(mask)
     instance_mask_list = [] 
@@ -85,7 +75,6 @@ for i in tqdm(json_dict['frames']):
         # init_mask_list.append((sparse_mask == instance).astype(np.uint8) * 255)
     
     instance_masks = np.stack(instance_mask_list, axis=0)
-    # init_mask = np.stack(init_mask_list, axis=0)
     
     
     
@@ -99,4 +88,3 @@ for i in tqdm(json_dict['frames']):
 
     with h5py.File(output_file, 'w') as f:
         f.create_dataset('cp_instance_id_segmaps', data = output.astype(int))
-    # cv2.imwrite(output_file, output)
