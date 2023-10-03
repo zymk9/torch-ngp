@@ -5,12 +5,6 @@ import numpy as np
 import os
 from tqdm import tqdm
 
-# gpu_list = [1, 2, 3, 4, 6, 7]
-# part = 3
-# num_part = 4
-
-# os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_list[part])
-
 mask_root = '/data/bhuai/instance_nerf_data/workspace_new/instance_nerf_masks'
 img_root = '/data/bhuai/instance_nerf_data/front3d_extra_data'
 output_root = '/data/bhuai/instance_nerf_data/workspace_new/nerf_refined'
@@ -19,9 +13,6 @@ with open('/data/bhuai/instance_nerf_data/selected.txt', 'r') as f:
     scenes = f.readlines()
     scenes = [x.strip() for x in scenes]
     scenes = ['3dfront_' + x for x in scenes]
-
-# scenes = os.listdir(mask_root)
-# scenes = sorted(scenes)[part::num_part]
 
 for scene in tqdm(scenes):
     mask_dir = os.path.join(mask_root, scene)
