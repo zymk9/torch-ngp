@@ -273,6 +273,8 @@ def get_parser():
     parser.add_argument('--output_dir', type=str, help='path to output directory')
     parser.add_argument('--feature_dir', type=str, help='path to feature directory')
 
+    return parser
+
 
 if __name__ == '__main__':
     parser = get_parser()
@@ -303,4 +305,3 @@ if __name__ == '__main__':
             continue
 
         project_mask(mask_path, pose_path, output_path, feature_path, score_threshold=0.5)
-        
