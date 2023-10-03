@@ -17,8 +17,7 @@ NYU40_CLASS_NAMES = [
     'sink', 'lamp', 'bathtub', 'bag', 'otherstructure', 'otherfurniture', 'otherprop'
 ]
 
-# mask3d_dir = '/data/bhuai/nerf_rcnn_results/front3d/fcos_vggEF_1k/masks'
-mask3d_dir = '/data/bhuai/instance_nerf_data/rcnn_results/front3d_new/masks'
+mask3d_dir = ''
 
 # nyu40 ids used in 3dfront
 CLASS_IDS = [3, 4, 5, 6, 7, 10, 14, 32, 35, 39]
