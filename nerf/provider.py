@@ -125,7 +125,7 @@ class NeRFDataset:
         print(self.mode)
 
         if self.mode == 'colmap':
-            with open(os.path.join(self.root_path, 'test_transforms.json'), 'r') as f:
+            with open(os.path.join(self.root_path, 'transforms.json'), 'r') as f:
                 transform = json.load(f)
         elif self.mode == 'blender':
             # load all splits (train/valid/test), this is what instant-ngp in fact does...
