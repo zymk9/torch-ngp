@@ -13,7 +13,7 @@ Refer to torch-ngp instructions [here](https://github.com/ashawkey/torch-ngp#ins
 
 ### Dataset Orginzation
 
-We follow the data structure of torch-ngp, which uses a json file to store the camera parameters and a folder to store masks or images. The json file includes the relative path of the image to the folder so they are not necessary under the same folder
+We follow the data structure of torch-ngp, which uses a json file to store the camera parameters and a folder to store masks or images. The json file includes the relative path of the image to the folder so they are not necessary under the same folder.
 
 
 ```
