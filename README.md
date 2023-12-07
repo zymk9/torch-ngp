@@ -45,11 +45,11 @@ ${train_dir} \
 
 
 ### Mask Preparation
-First, ensure you have obtained the discrete 3D masks of the instances by running inference with the trained NeRF-RCNN model. If you haven't, check [here]() for details.
+First, ensure you have obtained the discrete 3D masks of the instances by running inference with the trained NeRF-RCNN model. If you haven't, check [here](https://github.com/lyclyc52/Instance_NeRF) for details.
 
 To project the 3D masks to 2D, use the python script `project_3d_masks.py` in `scripts`. [PyTorch3D](https://pytorch3d.org/) is needed for running the code. Simple run `python project_3d_masks.py -h` to see the arguments needed.
 
-Then, you should get the initial 2D segmentation masks using Mask2Former, and get the multi-view consistent 2D masks by matching the projected 2D masks with masks from Mask2Former. Please refer to the instructions [here](../Mask2Former/README.md).
+Then, you should get the initial 2D segmentation masks using Mask2Former, and get the multi-view consistent 2D masks by matching the projected 2D masks with masks from Mask2Former. Please refer to the instructions [here](https://github.com/lyclyc52/Instance_NeRF/tree/main/Mask2Former_sample).
 
 After finishing these steps, you should have multi-view consistent 2D instance segmentation masks at hand, which are ready to be used for instance field training.
 
